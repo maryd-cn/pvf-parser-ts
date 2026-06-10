@@ -671,6 +671,9 @@
       }
     ],
     "configurationDefaults": {
+      "workbench.colorCustomizations": {
+        "editorWhitespace.foreground": "#7c8794"
+      },
       "[pvf-act]": {
         "editor.renderWhitespace": "boundary",
         "editor.tabSize": 4,
