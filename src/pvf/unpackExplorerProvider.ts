@@ -4,6 +4,7 @@ import * as path from 'path';
 import { PVF_MANIFEST_FILE, PvfDirectoryManifest } from './directoryArchive';
 import { normalizeTreeCommentPath, normalizeTreeCommentVersion, PvfTreeCommentService } from './treeComments';
 import { readConfiguredUnpackRoots } from './unpackEnv';
+import { UnpackMetadataService, UnpackResolvedMetadata, normalizeUnpackKey } from './unpackMetadata';
 
 export interface UnpackExplorerEntry {
   fsPath: string;
@@ -34,15 +35,31 @@ export class UnpackExplorerProvider implements vscode.TreeDataProvider<UnpackExp
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<UnpackExplorerEntry | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private rootsCache: Promise<UnpackExplorerEntry[]> | undefined;
+  private readonly metadata: UnpackMetadataService;
+  private readonly metadataQueue: UnpackExplorerEntry[] = [];
+  private readonly metadataQueued = new Set<string>();
+  private readonly iconQueue: UnpackExplorerEntry[] = [];
+  private readonly iconQueued = new Set<string>();
+  private activeMetadataTasks = 0;
+  private activeIconTasks = 0;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly comments: PvfTreeCommentService,
     private readonly output?: vscode.OutputChannel,
-  ) {}
+  ) {
+    this.metadata = new UnpackMetadataService(context, output);
+  }
 
   refresh(): void {
     this.rootsCache = undefined;
+    this.metadata.clear();
+    this.metadataQueue.length = 0;
+    this.iconQueue.length = 0;
+    this.metadataQueued.clear();
+    this.iconQueued.clear();
+    this.activeMetadataTasks = 0;
+    this.activeIconTasks = 0;
     this._onDidChangeTreeData.fire();
   }
 
@@ -54,16 +71,19 @@ export class UnpackExplorerProvider implements vscode.TreeDataProvider<UnpackExp
     if (comment) item.description = `(${comment})`;
     item.contextValue = this.contextValueFor(element);
     item.resourceUri = vscode.Uri.file(element.fsPath);
-    item.tooltip = this.tooltipFor(element, comment);
+    const metadata = element.isDirectory ? undefined : this.metadata.getCached(element);
+    item.tooltip = this.tooltipFor(element, comment, metadata);
     if (element.isDirectory) {
       item.iconPath = vscode.ThemeIcon.Folder;
     } else {
-      item.iconPath = vscode.ThemeIcon.File;
+      item.description = this.descriptionFor(comment, metadata);
+      item.iconPath = this.iconFor(metadata);
       item.command = {
         command: 'vscode.open',
         title: '打开文件',
         arguments: [vscode.Uri.file(element.fsPath)],
       };
+      this.scheduleMetadata(element, metadata);
     }
     return item;
   }
@@ -136,13 +156,106 @@ export class UnpackExplorerProvider implements vscode.TreeDataProvider<UnpackExp
     return 'pvf.unpackFile';
   }
 
-  private tooltipFor(element: UnpackExplorerEntry, comment: string | undefined): vscode.MarkdownString {
+  private descriptionFor(comment: string | undefined, metadata: UnpackResolvedMetadata | undefined): string | undefined {
+    const cfg = vscode.workspace.getConfiguration();
+    const showComment = cfg.get<boolean>('pvf.unpackExplorer.metadata.showComment', true);
+    const showItemName = cfg.get<boolean>('pvf.unpackExplorer.metadata.showItemName', true);
+    const showItemCode = cfg.get<boolean>('pvf.unpackExplorer.metadata.showItemCode', true);
+    const codeFormat = cfg.get<string>('pvf.unpackExplorer.metadata.itemCodeFormat', '<{code}>') || '<{code}>';
+    const parts: string[] = [];
+    if (showComment && comment) parts.push(`(${comment})`);
+    if (showItemName && metadata?.itemName) parts.push(metadata.itemName);
+    if (showItemCode && typeof metadata?.itemCode === 'number') parts.push(codeFormat.replace(/\{code\}/g, String(metadata.itemCode)));
+    return parts.length ? parts.join(' ') : undefined;
+  }
+
+  private iconFor(metadata: UnpackResolvedMetadata | undefined): vscode.ThemeIcon | { light: vscode.Uri; dark: vscode.Uri } {
+    if (metadata?.iconPath) {
+      const uri = vscode.Uri.file(metadata.iconPath);
+      return { light: uri, dark: uri };
+    }
+    return vscode.ThemeIcon.File;
+  }
+
+  private queueKey(element: UnpackExplorerEntry): string {
+    return `${path.resolve(element.root)}\0${normalizeUnpackKey(element.key)}\0${element.version}`;
+  }
+
+  private scheduleMetadata(element: UnpackExplorerEntry, cached: UnpackResolvedMetadata | undefined): void {
+    if (element.isDirectory || !element.key) return;
+    if (cached) {
+      if (cached.icon && !cached.iconPath && cached.iconState !== 'loading' && cached.iconState !== 'missing' && cached.iconState !== 'error') {
+        this.scheduleIcon(element);
+      }
+      return;
+    }
+    const key = this.queueKey(element);
+    if (this.metadataQueued.has(key)) return;
+    this.metadataQueued.add(key);
+    this.metadataQueue.push(element);
+    this.pumpMetadataQueue();
+  }
+
+  private pumpMetadataQueue(): void {
+    const limit = 8;
+    while (this.activeMetadataTasks < limit && this.metadataQueue.length > 0) {
+      const element = this.metadataQueue.shift()!;
+      const key = this.queueKey(element);
+      this.activeMetadataTasks++;
+      void this.metadata.resolveMetadata(element)
+        .then(meta => {
+          this._onDidChangeTreeData.fire(element);
+          if (meta.icon) this.scheduleIcon(element);
+        })
+        .catch((err: any) => {
+          this.output?.appendLine(`[PVF] failed to resolve unpack metadata ${element.key}: ${String(err && err.message || err)}`);
+        })
+        .finally(() => {
+          this.metadataQueued.delete(key);
+          this.activeMetadataTasks--;
+          this.pumpMetadataQueue();
+        });
+    }
+  }
+
+  private scheduleIcon(element: UnpackExplorerEntry): void {
+    const key = this.queueKey(element);
+    if (this.iconQueued.has(key)) return;
+    this.iconQueued.add(key);
+    this.iconQueue.push(element);
+    this.pumpIconQueue();
+  }
+
+  private pumpIconQueue(): void {
+    const limit = 2;
+    while (this.activeIconTasks < limit && this.iconQueue.length > 0) {
+      const element = this.iconQueue.shift()!;
+      const key = this.queueKey(element);
+      this.activeIconTasks++;
+      void this.metadata.resolveIcon(element)
+        .then(() => this._onDidChangeTreeData.fire(element))
+        .catch((err: any) => {
+          this.output?.appendLine(`[PVF] failed to resolve unpack icon ${element.key}: ${String(err && err.message || err)}`);
+        })
+        .finally(() => {
+          this.iconQueued.delete(key);
+          this.activeIconTasks--;
+          this.pumpIconQueue();
+        });
+    }
+  }
+
+  private tooltipFor(element: UnpackExplorerEntry, comment: string | undefined, metadata?: UnpackResolvedMetadata): vscode.MarkdownString {
     const md = new vscode.MarkdownString('', true);
     md.isTrusted = { enabledCommands: ['pvf.editTreeComment'] };
     md.appendMarkdown(`**${escapeMarkdown(element.name)}**\n\n`);
     if (element.key) md.appendMarkdown(`PVF 路径: \`${escapeInlineCode(element.key)}\`\n\n`);
     md.appendMarkdown(`磁盘路径: \`${escapeInlineCode(element.fsPath)}\``);
     if (comment) md.appendMarkdown(`\n\n注释: ${escapeMarkdown(comment)}`);
+    if (metadata?.itemName) md.appendMarkdown(`\n\n名称: ${escapeMarkdown(metadata.itemName)}`);
+    if (typeof metadata?.itemCode === 'number') md.appendMarkdown(`\n\n代码: \`${metadata.itemCode}\``);
+    if (typeof metadata?.rarity === 'number') md.appendMarkdown(`\n\n稀有度: \`${metadata.rarity}\``);
+    if (metadata?.icon) md.appendMarkdown(`\n\n图标: \`${escapeInlineCode(metadata.icon.imagePath)}\` #${metadata.icon.frameIndex}`);
     md.appendMarkdown(`\n\n版本: \`${escapeInlineCode(element.version)}\``);
     if (element.key) {
       const args = encodeURIComponent(JSON.stringify([{

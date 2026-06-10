@@ -34,18 +34,20 @@ The webview React code (in `src/webview/`) is compiled by [esbuild](scripts/buil
 
 ```
 src/
-├── extension.ts          # Entry point: registers FS provider, tree view,
+├── extension.ts          # Entry point: registers FS provider, views,
 │                         #   commands, language features, search, Codelens
 ├── pvf/                  # Core PVF pack engine
 │   ├── model.ts          # PvfModel: the central data model (open/save/read/write)
 │   ├── modelIO.ts        # Low-level PVF file I/O (header parsing, tree decryption)
 │   ├── crypto.ts         # PvfCrypto: PVF's custom encryption (checksum-based XOR)
 │   ├── pvfFile.ts        # Per-file data & metadata (decrypt, script detection)
-│   ├── provider.ts       # TreeDataProvider for the "PVF Explorer" sidebar
+│   ├── provider.ts       # TreeDataProvider for the packed PVF resource tree
+│   ├── bookmarkProvider.ts # TreeDataProvider for the built-in bookmark view
 │   ├── decorations.ts    # File status decorations (modified, etc.)
 │   ├── treeComments.ts   # Built-in/user path comments keyed by PVF path/version
-│   ├── unpackEnv.ts      # Reads .env UNPACK_DIR/PVF_UNPACK_DIR for disk unpack roots
-│   ├── unpackExplorerProvider.ts # TreeDataProvider for disk unpack dir comments
+│   ├── unpackEnv.ts      # Reads .env UNPACK_DIR/PVF_UNPACK_DIR and NPK_DIR
+│   ├── unpackMetadata.ts # Lazy disk metadata/code/icon resolver for unpack tree
+│   ├── unpackExplorerProvider.ts # TreeDataProvider for disk unpack dir resources
 │   ├── diskTreeCommentDecorations.ts # Native Explorer hover tooltip for unpack paths
 │   ├── scriptCompiler.ts / scriptDecompiler.ts  # Binary ↔ text script format
 │   ├── aniCompiler.ts / binaryAni.ts            # .ani file compile/decompile
@@ -53,6 +55,9 @@ src/
 │   ├── stringTable.ts / stringView.ts           # stringtable.bin format
 │   ├── metadata.ts       # [name]/[icon] tag parser for file display names
 │   ├── searchQuickOpen.ts # Ctrl+Alt+P search: file path / @string ref / #item code
+│   ├── resources/
+│   │   ├── treeComments.json # Built-in path comments
+│   │   └── bookmarks.json    # Cleaned built-in bookmark groups
 │   └── services/         # Split-out search services, content providers, CodeLens
 │       ├── fileSearchService.ts   # File name index builder & ranker
 │       ├── codeSearchService.ts   # Item code search (from .lst mappings)
@@ -94,14 +99,53 @@ src/
 ### Virtual File System (`pvf:` scheme)
 The extension implements `vscode.FileSystemProvider` for the `pvf:` URI scheme. All files inside a PVF pack appear as `pvf://path/to/file`. Reading/writing delegates to `PvfModel.readFileBytes()` / `writeFile()`. On write, metadata ([name]/[icon] tags) is re-parsed and the tree refreshes.
 
+### PVF Sidebar Views
+`package.json` contributes one activity bar container (`pvfExplorer`) with these views, in order:
+
+- `pvfExplorerView`: the packed PVF resource tree backed by `PvfProvider`.
+- `pvfUnpackExplorerView`: the real disk unpack directory tree backed by `UnpackExplorerProvider`.
+- `pvfBookmarkView`: the built-in bookmark tree backed by `BookmarkProvider`.
+
+Do not add a separate "native resource tree" or alternate resource-manager view for unpack-directory metadata. The expected user-visible target for disk validation is `pvfUnpackExplorerView`.
+
 ### Disk Unpack Directory Comments
 Path comments are stored in `src/pvf/resources/treeComments.json` as `{ schemaVersion, version, comments }`, with user overrides persisted under VS Code `globalStorage` by PVF `fileVersion`. `PvfTreeCommentService` merges built-in comments with per-version user edits.
 
-The disk unpack root is configured through `.env` (`UNPACK_DIR`, `PVF_UNPACK_DIR`, or `pvf_unpack_dir`) and resolved by `unpackEnv.ts`. The custom `pvfUnpackExplorerView` uses `UnpackExplorerProvider` to show the real disk tree from `UNPACK_DIR`; file/folder names remain in normal tree text color, while path comments are placed in `TreeItem.description` so VS Code renders them in description/comment color, e.g. `equipment    (装备)`.
+The disk unpack root is configured through `.env` (`UNPACK_DIR`, `PVF_UNPACK_DIR`, or `pvf_unpack_dir`) and resolved by `unpackEnv.ts`. NPK icon roots for the unpack tree come from `pvf.unpackExplorer.npkIcon.paths`, `.env` `NPK_DIR`/`PVF_NPK_DIR`, then legacy `pvf.npkRoot`.
+
+The custom `pvfUnpackExplorerView` uses `UnpackExplorerProvider` to show the real disk tree from `UNPACK_DIR`; file/folder names remain in normal tree text color, while path comments, script names, and item codes are placed in `TreeItem.description`, e.g. `101000001.equ    古代遗骨的青铜剑[活动] <101000001>`. `UnpackMetadataService` lazily reads encountered files and likely `.lst` files in the background, then decodes NPK icons into `globalStorage/unpack-icon-cache` and refreshes only the affected tree item.
+
+Keep `getChildren()` in `UnpackExplorerProvider` cheap: it should only `readdir`, map, and sort immediate children. Do not synchronously read `.equ` files, parse `.lst`, or decode NPK frames during directory expansion; large directories such as `equipment/character` must remain responsive.
 
 Native VS Code Explorer cannot append arbitrary full text after file names. Its `FileDecoration.badge` is only a very short marker and labels longer than about two characters may be clipped or omitted. Therefore `diskTreeCommentDecorations.ts` must not be used for full inline comments; it only provides native Explorer hover tooltips and the context-menu command path for disk files. Full visible comments belong in the custom `pvfUnpackExplorerView`.
 
 When verifying hover/tooltip/floating-window behavior, test primarily against real disk files opened from the configured `UNPACK_DIR`. This covers disk path normalization, `.env` root resolution, `.lst` lookup from unpacked folders, native Explorer hover tooltip behavior, and the right-click `pvf.editTreeComment` command. Testing only `pvf:` virtual files does not validate the disk-unpack workflow.
+
+### Built-In Bookmarks
+Built-in bookmarks are stored in `src/pvf/resources/bookmarks.json` as a cleaned tree:
+
+```json
+{
+  "schemaVersion": 1,
+  "roots": [
+    { "label": "我的书签", "children": [{ "label": "商城", "path": "etc/newcashshop.etc" }] }
+  ]
+}
+```
+
+The source import was `temporary file/BookMarkGroup.json`, but that directory is ignored by Git and should not be treated as runtime data. The committed resource intentionally drops legacy fields such as `FilePath`, `IsFile`, `Sort`, and `CutStatus`; `Sort` is applied before writing the final array order.
+
+`BookmarkProvider` exposes folders and file bookmarks in `pvfBookmarkView`. It loads built-in bookmarks on first use, then persists user edits to `context.globalStorageUri/bookmarks.json`. Register the view with `vscode.window.createTreeView(..., { dragAndDropController: bookmarkTree })`, not `registerTreeDataProvider`, otherwise drag/drop reordering will not work. File bookmarks use `TreeItem.resourceUri = pvf:/...` for PVF-style decorations and call these commands:
+
+- `pvf.openBookmark`: first tries a real disk file under configured unpack roots, then falls back to `pvf.openFuzzyPath`.
+- `pvf.openBookmarkOnDisk`: opens only the matching disk file from `.env` unpack roots.
+- `pvf.openBookmarkInPack`: opens only the current PVF pack entry.
+- `pvf.copyBookmarkPath`: copies the normalized PVF path.
+- `pvf.createBookmarkFolder`, `pvf.renameBookmark`, `pvf.deleteBookmark`, `pvf.resetBookmarks`: edit the persisted bookmark tree.
+- `pvf.addPvfToBookmarks`: adds a `PvfFileEntry` from `pvfExplorerView`; folder entries create bookmark folders.
+- `pvf.addUnpackToBookmarks`: adds an `UnpackExplorerEntry` from `pvfUnpackExplorerView`; folder entries create bookmark folders.
+
+Disk lookup uses `readConfiguredUnpackRoots()` and a case-insensitive path walk so bookmarks with mixed-case legacy PVF paths can still resolve on Windows unpack directories. Keep bookmark paths normalized with `/` separators and no leading slash.
 
 ### Core Data Model (`PvfModel`)
 - Holds a `Map<string, PvfFile>` (key = normalized path), plus caches for children, encodings, display names, and codes

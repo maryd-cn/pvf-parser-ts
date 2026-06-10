@@ -67,7 +67,7 @@ export function parseScriptMetadata(text: string): FileMetaInfo {
 	// 标准化换行
 	const t = text.replace(/\r\n?/g, '\n');
 	// 简单块解析：匹配 [section]\n(若干行，直到空行或下一个[xxx])
-	const sectionRegex = /^\[(.+?)\]\n([\s\S]*?)(?=^\[|\Z)/gm;
+	const sectionRegex = /^\[(.+?)\]\n([\s\S]*?)(?=^\[|(?![\s\S]))/gm;
 	let m: RegExpExecArray | null;
 	while ((m = sectionRegex.exec(t)) !== null) {
 		const key = m[1].trim().toLowerCase();
@@ -92,7 +92,7 @@ export function parseScriptMetadata(text: string): FileMetaInfo {
 				// 示例: `Character/Common/SkillIcon.img`\t60
 				const m1 = ln.match(/^([`'\"])(.+?\.img)\1\s+(\d+)/i) || ln.match(/^(.+?\.img)\s+(\d+)$/i);
 				if (m1) {
-					const pathRaw = m1[2] || m1[1];
+					const pathRaw = m1.length >= 4 ? m1[2] : m1[1];
 					const frameStr = m1[m1.length-1];
 					const frame = parseInt(frameStr, 10);
 					if (pathRaw && Number.isFinite(frame)) { meta.icon = { img: pathRaw, frame }; break; }
@@ -157,7 +157,7 @@ async function parseOne(model: PvfModel, key: string, excludes: string[], scanne
 }
 
 /** 规范化 img 逻辑路径：输入示例 Character/Common/SkillIcon.img -> sprite/character/common/skillicon.img */
-function normalizeImgLogical(p: string): string {
+export function normalizeImgLogical(p: string): string {
 	let s = p.trim().replace(/\\/g,'/');
 	s = s.replace(/^`+|`+$/g,'');
 	if (!/^sprite\//i.test(s)) s = 'sprite/' + s;
@@ -165,24 +165,43 @@ function normalizeImgLogical(p: string): string {
 	return s;
 }
 
-async function generateIconFor(model: PvfModel, fileKey: string, rawImg: string, frame: number) {
+export async function generateIconFor(model: PvfModel, fileKey: string, rawImg: string, frame: number) {
 	try {
 		const imgLogical = normalizeImgLogical(rawImg);
 		const store: Map<string, any> = (model as any)._fileIconMeta || ((model as any)._fileIconMeta = new Map());
-		if (store.has(fileKey) && store.get(fileKey).pngPath) return; // 已生成
 		// 记录基础信息
 		const rec = store.get(fileKey) || { img: imgLogical, frame };
 		rec.img = imgLogical; rec.frame = frame;
 		store.set(fileKey, rec);
 		const cfg = vscode.workspace.getConfiguration();
-		const root = (cfg.get<string>('pvf.npkRoot') || '').trim();
-		if (!root) return; // 缺少根目录，延迟
+		const legacyRoot = (cfg.get<string>('pvf.npkRoot') || '').trim();
+		const configuredRoots = cfg.get<string[]>('pvfExplorer.npkIcon.paths', []);
+		const roots = [
+			...(Array.isArray(configuredRoots) ? configuredRoots.map(v => String(v || '').trim()).filter(Boolean) : []),
+			...(legacyRoot ? [legacyRoot] : []),
+		];
+		if (roots.length === 0) return; // 缺少根目录，延迟
+		const iconSize = cfg.get<number>('pvfExplorer.npkIcon.size', 20);
+		const cacheEnabled = cfg.get<boolean>('pvfExplorer.npkIcon.cache.enabled', true);
+		const sessionNonce = cacheEnabled
+			? 'cache'
+			: ((model as any)._iconCacheSessionNonce || ((model as any)._iconCacheSessionNonce = `${Date.now()}:${Math.random()}`));
+		const hash = quickHash([roots.join('|'), imgLogical, frame, iconSize, 'png-v2', sessionNonce].join(':'));
+		if (rec.pngPath && rec.pngCacheKey === hash) return; // 已生成
 		const extCtx = (model as any)._extCtx as vscode.ExtensionContext | undefined;
 		if (!extCtx) return; // 还没有上下文
 		// 动态加载解析逻辑
 		const { loadAlbumForImage } = await import('../commander/previewAni/npkResolver.js');
 		const { getSpriteRgba } = await import('../npk/imgReader.js');
-		const album = await loadAlbumForImage(extCtx, root, imgLogical).catch(()=>undefined);
+		let album: any | undefined;
+		let resolvedRoot = '';
+		for (const root of roots) {
+			album = await loadAlbumForImage(extCtx, root, imgLogical).catch(()=>undefined);
+			if (album) {
+				resolvedRoot = root;
+				break;
+			}
+		}
 		if (!album || !album.sprites || !album.sprites[frame]) return;
 		const rgba = getSpriteRgba(album as any, frame);
 		if (!rgba) return;
@@ -190,10 +209,10 @@ async function generateIconFor(model: PvfModel, fileKey: string, rawImg: string,
 		const png = encodePng(rgba, sp.width, sp.height);
 		const cacheDir = path.join(extCtx.globalStorageUri.fsPath, 'icon-cache');
 		try { await fs.mkdir(cacheDir, { recursive: true }); } catch {}
-		const hash = quickHash(imgLogical + ':' + frame);
 		const file = path.join(cacheDir, hash + '.png');
 		try { await fs.writeFile(file, png); } catch {}
 		rec.pngPath = file;
+		rec.pngCacheKey = hash;
 		store.set(fileKey, rec);
 	} catch {/* ignore single icon */}
 }

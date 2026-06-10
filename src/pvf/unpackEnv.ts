@@ -19,6 +19,19 @@ function parseEnv(text: string): Record<string, string> {
   return result;
 }
 
+function uniqueResolved(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of paths) {
+    const resolved = path.resolve(item);
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(resolved);
+  }
+  return result;
+}
+
 export function pathContains(root: string, filePath: string): boolean {
   const resolvedRoot = path.resolve(root);
   const resolvedFile = path.resolve(filePath);
@@ -50,4 +63,24 @@ export async function readConfiguredUnpackRoots(context: vscode.ExtensionContext
     }
   }
   return roots;
+}
+
+export async function readConfiguredNpkRoots(context: vscode.ExtensionContext): Promise<string[]> {
+  const workspaceRoots = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) || [];
+  const extensionRoot = context.extensionUri.fsPath;
+  const candidates = [...workspaceRoots, extensionRoot];
+  const roots: string[] = [];
+  for (const base of candidates) {
+    const envPath = path.join(base, '.env');
+    let env: Record<string, string>;
+    try {
+      env = parseEnv(await fs.readFile(envPath, 'utf8'));
+    } catch {
+      continue;
+    }
+    const configured = env.NPK_DIR || env.PVF_NPK_DIR || env.pvf_npk_dir || env.NPK_ROOT || env.PVF_NPK_ROOT || env.pvf_npk_root;
+    if (!configured) continue;
+    roots.push(path.resolve(base, configured));
+  }
+  return uniqueResolved(roots);
 }

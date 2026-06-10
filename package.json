@@ -912,6 +912,51 @@
           "default": "",
           "description": "NPK 文件根目录（通常为游戏目录下的 ImagePacks2）。"
         },
+        "pvf.unpackExplorer.npkIcon.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否显示从 NPK 图包解析出的真实图标。关闭后使用文件类型图标。"
+        },
+        "pvf.unpackExplorer.npkIcon.paths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "解包目录 NPK 图包目录列表。可填写 ImagePacks2 目录或其上级目录；为空时回退使用 .env 的 NPK_DIR 和 pvf.npkRoot。"
+        },
+        "pvf.unpackExplorer.npkIcon.cache.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否复用已解码的 NPK 图标缓存。"
+        },
+        "pvf.unpackExplorer.npkIcon.size": {
+          "type": "number",
+          "default": 20,
+          "minimum": 16,
+          "maximum": 64,
+          "description": "解包目录行内 NPK 图标尺寸。"
+        },
+        "pvf.unpackExplorer.metadata.showComment": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否显示本地路径注释。"
+        },
+        "pvf.unpackExplorer.metadata.showItemName": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否显示 PVF 脚本内解析出的物品/资源名称。"
+        },
+        "pvf.unpackExplorer.metadata.showItemCode": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否显示来自 .lst 映射的物品代码。"
+        },
+        "pvf.unpackExplorer.metadata.itemCodeFormat": {
+          "type": "string",
+          "default": "<{code}>",
+          "description": "解包目录物品代码显示格式。使用 {code} 作为数字占位符。"
+        },
         "pvf.showScriptDisplayName": {
           "type": "boolean",
           "default": true,
@@ -1021,6 +1066,11 @@
           "id": "pvfUnpackExplorerView",
           "name": "解包目录",
           "icon": "codicon:folder-library"
+        },
+        {
+          "id": "pvfBookmarkView",
+          "name": "书签",
+          "icon": "codicon:bookmark"
         }
       ]
     },
@@ -1044,6 +1094,15 @@
       {
         "command": "pvf.openNpk",
         "title": "打开 NPK/IMG 并解析"
+      },
+      {
+        "command": "pvf.rebuildNpkIndex",
+        "title": "重建 NPK 索引",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "pvf.showNpkIndexStatus",
+        "title": "显示 NPK 索引状态"
       },
       {
         "command": "pvf.setNpkRoot",
@@ -1149,6 +1208,61 @@
         "icon": "$(copy)"
       },
       {
+        "command": "pvf.refreshBookmarks",
+        "title": "刷新书签",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "pvf.openBookmark",
+        "title": "打开书签",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "pvf.openBookmarkInPack",
+        "title": "在 PVF 中打开",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "pvf.openBookmarkOnDisk",
+        "title": "在解包目录中打开",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "pvf.copyBookmarkPath",
+        "title": "复制书签路径",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "pvf.createBookmarkFolder",
+        "title": "新建书签文件夹",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "pvf.deleteBookmark",
+        "title": "删除书签",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "pvf.renameBookmark",
+        "title": "重命名书签",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "pvf.resetBookmarks",
+        "title": "重置书签",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "pvf.addPvfToBookmarks",
+        "title": "添加到书签",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "pvf.addUnpackToBookmarks",
+        "title": "添加到书签",
+        "icon": "$(bookmark)"
+      },
+      {
         "command": "pvf.unpackPack",
         "title": "解封PVF到目录",
         "icon": "$(archive)"
@@ -1207,6 +1321,21 @@
           "command": "pvf.refreshUnpackExplorer",
           "when": "view == pvfUnpackExplorerView",
           "group": "navigation@0"
+        },
+        {
+          "command": "pvf.refreshBookmarks",
+          "when": "view == pvfBookmarkView",
+          "group": "navigation@0"
+        },
+        {
+          "command": "pvf.createBookmarkFolder",
+          "when": "view == pvfBookmarkView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "pvf.resetBookmarks",
+          "when": "view == pvfBookmarkView",
+          "group": "navigation@9"
         }
       ],
       "editor/context": [
@@ -1312,6 +1441,11 @@
           "group": "navigation@3"
         },
         {
+          "command": "pvf.addPvfToBookmarks",
+          "when": "view == pvfExplorerView && (viewItem == pvf.file || viewItem == pvf.folder)",
+          "group": "navigation@3.1"
+        },
+        {
           "command": "pvf.replaceFile",
           "when": "view == pvfExplorerView && viewItem == pvf.file",
           "group": "navigation@3"
@@ -1367,9 +1501,49 @@
           "group": "navigation@40"
         },
         {
+          "command": "pvf.addUnpackToBookmarks",
+          "when": "view == pvfUnpackExplorerView && (viewItem == pvf.unpackFolder || viewItem == pvf.unpackFile || viewItem == pvf.unpackFile.ani || viewItem == pvf.unpackFile.aic)",
+          "group": "navigation@41"
+        },
+        {
           "command": "pvf.editTreeComment",
           "when": "view == pvfUnpackExplorerView && (viewItem == pvf.unpackFolder || viewItem == pvf.unpackFile || viewItem == pvf.unpackFile.ani || viewItem == pvf.unpackFile.aic)",
           "group": "navigation@50"
+        },
+        {
+          "command": "pvf.openBookmark",
+          "when": "view == pvfBookmarkView && viewItem == pvf.bookmarkFile",
+          "group": "navigation@0"
+        },
+        {
+          "command": "pvf.openBookmarkInPack",
+          "when": "view == pvfBookmarkView && viewItem == pvf.bookmarkFile",
+          "group": "navigation@1"
+        },
+        {
+          "command": "pvf.openBookmarkOnDisk",
+          "when": "view == pvfBookmarkView && viewItem == pvf.bookmarkFile",
+          "group": "navigation@2"
+        },
+        {
+          "command": "pvf.copyBookmarkPath",
+          "when": "view == pvfBookmarkView && viewItem == pvf.bookmarkFile",
+          "group": "navigation@40"
+        },
+        {
+          "command": "pvf.createBookmarkFolder",
+          "when": "view == pvfBookmarkView && viewItem == pvf.bookmarkFolder",
+          "group": "navigation@10"
+        },
+        {
+          "command": "pvf.renameBookmark",
+          "when": "view == pvfBookmarkView && (viewItem == pvf.bookmarkFolder || viewItem == pvf.bookmarkFile)",
+          "group": "navigation@30"
+        },
+        {
+          "command": "pvf.deleteBookmark",
+          "when": "view == pvfBookmarkView && (viewItem == pvf.bookmarkFolder || viewItem == pvf.bookmarkFile)",
+          "group": "navigation@31"
         }
       ]
     }

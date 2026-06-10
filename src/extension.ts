@@ -18,6 +18,15 @@ import getPvfContent, { getIconBase64ByCode , getNameByCodeAndLst , parsePvfScri
 import getIconFrameBase64 from './pvf/services/getIconFrame';
 import { registerStringTableCodeLens } from './pvf/services/stringTableCodeLens';
 import { scriptTagLanguageIdForPath } from './scriptLang/genericTags';
+import {
+    BookmarkEntry,
+    BookmarkProvider,
+    bookmarkLabelFromTarget,
+    bookmarkPathFromPvfTarget,
+    bookmarkPathFromTarget,
+    bookmarkPathFromUnpackTarget,
+    findBookmarkInUnpackRoots,
+} from './pvf/bookmarkProvider';
 
 async function ensureNativeWhitespaceColor(output: vscode.OutputChannel) {
     try {
@@ -86,6 +95,7 @@ export function activate(context: vscode.ExtensionContext) {
     const treeComments = new PvfTreeCommentService(context, model, output);
     const tree = new PvfProvider(model, output, treeComments);
     const unpackTree = new UnpackExplorerProvider(context, treeComments, output);
+    const bookmarkTree = new BookmarkProvider(context, output);
     const deco = registerPvfDecorations(context, model);
     const diskTreeCommentDeco = registerDiskTreeCommentDecorations(context, treeComments, output);
     void treeComments.load().then(() => {
@@ -98,8 +108,15 @@ export function activate(context: vscode.ExtensionContext) {
     // 图标逻辑：在 provider 中通过 vscode.extensions.getExtension 查找当前扩展根路径，从 media/icons 读取 png
     // 若需要在运行时修改映射，可暴露命令以动态刷新（后续可扩展）
 
-    vscode.window.registerTreeDataProvider('pvfExplorerView', tree);
-    vscode.window.registerTreeDataProvider('pvfUnpackExplorerView', unpackTree);
+    context.subscriptions.push(
+        vscode.window.registerTreeDataProvider('pvfExplorerView', tree),
+        vscode.window.registerTreeDataProvider('pvfUnpackExplorerView', unpackTree),
+        vscode.window.createTreeView('pvfBookmarkView', {
+            treeDataProvider: bookmarkTree,
+            dragAndDropController: bookmarkTree,
+            canSelectMany: true,
+        }),
+    );
     // register document link provider for .lst/.nut and other path-like tokens
     registerPathLinkProvider(context, model);
 
@@ -225,6 +242,96 @@ export function activate(context: vscode.ExtensionContext) {
         if (!text) return;
         await vscode.env.clipboard.writeText(text);
         vscode.window.showInformationMessage('已复制路径到剪贴板');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.refreshBookmarks', () => {
+        void bookmarkTree.refresh();
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.createBookmarkFolder', async (target?: BookmarkEntry) => {
+        const parent = target && !target.key ? target : undefined;
+        await bookmarkTree.createFolder(parent);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.deleteBookmark', async (target?: BookmarkEntry) => {
+        if (!target) return;
+        await bookmarkTree.deleteEntry(target);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.renameBookmark', async (target?: BookmarkEntry) => {
+        if (!target) return;
+        await bookmarkTree.renameEntry(target);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.resetBookmarks', async () => {
+        const ok = await vscode.window.showWarningMessage('重置书签为插件内置默认内容？当前自定义书签会被覆盖。', { modal: true }, '重置');
+        if (ok !== '重置') return;
+        await bookmarkTree.resetToBuiltIn();
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.addPvfToBookmarks', async (target?: PvfFileEntry) => {
+        const key = bookmarkPathFromPvfTarget(target);
+        if (!key) {
+            vscode.window.showWarningMessage('无法添加书签：缺少 PVF 路径。');
+            return;
+        }
+        if (target && !target.isFile) {
+            const parent = await bookmarkTree.pickFolder(key);
+            if (parent === false) return;
+            await bookmarkTree.createFolder(parent, bookmarkLabelFromTarget(target));
+            return;
+        }
+        await bookmarkTree.addBookmarkInteractive({ key, label: bookmarkLabelFromTarget(target) });
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.addUnpackToBookmarks', async (target?: { key?: string; name?: string; isDirectory?: boolean }) => {
+        const key = bookmarkPathFromUnpackTarget(target);
+        if (!key) {
+            vscode.window.showWarningMessage('无法添加书签：缺少 PVF 路径。');
+            return;
+        }
+        if (target?.isDirectory) {
+            const parent = await bookmarkTree.pickFolder(key);
+            if (parent === false) return;
+            await bookmarkTree.createFolder(parent, bookmarkLabelFromTarget(target));
+            return;
+        }
+        await bookmarkTree.addBookmarkInteractive({ key, label: bookmarkLabelFromTarget(target) });
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.copyBookmarkPath', async (target?: unknown) => {
+        const key = bookmarkPathFromTarget(target);
+        if (!key) return;
+        await vscode.env.clipboard.writeText(key);
+        vscode.window.showInformationMessage('已复制书签路径到剪贴板');
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.openBookmarkOnDisk', async (target?: unknown) => {
+        const key = bookmarkPathFromTarget(target);
+        if (!key) return;
+        const uri = await findBookmarkInUnpackRoots(context, key);
+        if (!uri) {
+            vscode.window.showWarningMessage(`解包目录中未找到书签文件: ${key}`);
+            return;
+        }
+        await vscode.commands.executeCommand('vscode.open', uri);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.openBookmarkInPack', async (target?: unknown) => {
+        const key = bookmarkPathFromTarget(target);
+        if (!key) return;
+        await vscode.commands.executeCommand('pvf.openFuzzyPath', key);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('pvf.openBookmark', async (target?: unknown) => {
+        const key = bookmarkPathFromTarget(target);
+        if (!key) return;
+        const uri = await findBookmarkInUnpackRoots(context, key);
+        if (uri) {
+            await vscode.commands.executeCommand('vscode.open', uri);
+            return;
+        }
+        await vscode.commands.executeCommand('pvf.openFuzzyPath', key);
     }));
 
     // diagnostic command: show index status and storage path
