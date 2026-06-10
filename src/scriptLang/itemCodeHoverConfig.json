@@ -1,0 +1,617 @@
+{
+  "version": 1,
+  "description": "PVF script numeric code hover rules migrated from ItemCodeHoverConfig.xml.",
+  "lstAliases": {
+    "aicharacter": [
+      "aicharacter/aicharacter.lst",
+      "ai_character/aicharacter.lst",
+      "character/aicharacter.lst"
+    ],
+    "dungeon": [
+      "dungeon/dungeon.lst"
+    ],
+    "equipment": [
+      "equipment/equipment.lst"
+    ],
+    "map": [
+      "map/map.lst"
+    ],
+    "monster": [
+      "monster/monster.lst"
+    ],
+    "n_quest": [
+      "n_quest/n_quest.lst",
+      "n_quest/quest.lst"
+    ],
+    "npc": [
+      "npc/npc.lst"
+    ],
+    "passiveobject": [
+      "passiveobject/passiveobject.lst",
+      "passive_object/passiveobject.lst"
+    ],
+    "stackable": [
+      "stackable/stackable.lst"
+    ],
+    "tackable": [
+      "stackable/stackable.lst"
+    ],
+    "town": [
+      "town/town.lst"
+    ],
+    "worldmap": [
+      "worldmap/worldmap.lst"
+    ],
+    "wown": [
+      "town/town.lst"
+    ]
+  },
+  "files": [
+    {
+      "fileName": "*.act",
+      "sections": [
+        {
+          "sectionName": "[Test]",
+          "parentSectionName": "[SUMMON MONSTER]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[Index]",
+          "parentSectionName": "[SUMMON MONSTER]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[Index]",
+          "parentSectionName": "[SUMMON APC]",
+          "lstFileNames": [
+            "aicharacter"
+          ],
+          "description": "APC"
+        }
+      ]
+    },
+    {
+      "fileName": "etc/newcashshop.etc",
+      "sections": [
+        {
+          "sectionName": "[avatar]",
+          "indexes": [
+            1,
+            7
+          ],
+          "lstFileNames": [
+            "equipment"
+          ],
+          "description": "时装"
+        }
+      ]
+    },
+    {
+      "fileName": "*.dgn",
+      "sections": [
+        {
+          "sectionName": "[quest connection]",
+          "indexes": [
+            1
+          ],
+          "lstFileNames": [
+            "n_quest"
+          ],
+          "description": "任务"
+        },
+        {
+          "sectionName": "[common monster item drop list]",
+          "lstFileNames": [
+            "tackable",
+            "equipment"
+          ],
+          "description": "道具/装备"
+        },
+        {
+          "sectionName": "[common champion item drop list]",
+          "lstFileNames": [
+            "tackable",
+            "equipment"
+          ],
+          "description": "道具/装备"
+        },
+        {
+          "sectionName": "[super champion item drop list]",
+          "lstFileNames": [
+            "tackable",
+            "equipment"
+          ],
+          "description": "道具/装备"
+        },
+        {
+          "sectionName": "[boss item drop list]",
+          "lstFileNames": [
+            "tackable",
+            "equipment"
+          ],
+          "description": "道具/装备"
+        },
+        {
+          "sectionName": "[spawn common monster index]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[spawn common champion index]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[spawn super champion index]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[spawn boss index]",
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[required item]",
+          "lstFileNames": [
+            "stackable"
+          ],
+          "description": "道具"
+        },
+        {
+          "sectionName": "[pathgate object]",
+          "lstFileNames": [
+            "passiveobject"
+          ],
+          "description": "对象"
+        }
+      ],
+      "sectionRanges": [
+        {
+          "sectionName": "[map specification]",
+          "startIndex": 2,
+          "lstFileNames": [
+            "map"
+          ],
+          "description": "map"
+        }
+      ]
+    },
+    {
+      "fileName": "*.map",
+      "sections": [
+        {
+          "sectionName": "[npc]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "npc"
+          ],
+          "description": "NPC"
+        },
+        {
+          "sectionName": "[dungeon]",
+          "lstFileNames": [
+            "dungeon"
+          ],
+          "description": "副本"
+        },
+        {
+          "sectionName": "[monster]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "monster"
+          ],
+          "description": "怪物"
+        },
+        {
+          "sectionName": "[ai character]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "aicharacter"
+          ],
+          "description": "APC"
+        },
+        {
+          "sectionName": "[passive object]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "passiveobject"
+          ],
+          "description": "对象"
+        }
+      ]
+    },
+    {
+      "fileName": "*.mm",
+      "sections": [
+        {
+          "sectionName": "[index]",
+          "parentSectionName": "[world]",
+          "lstFileNames": [
+            "worldmap"
+          ],
+          "description": "副本接口"
+        },
+        {
+          "sectionName": "[index]",
+          "parentSectionName": "[npc]",
+          "lstFileNames": [
+            "npc"
+          ],
+          "description": "NPC"
+        },
+        {
+          "sectionName": "[index]",
+          "parentSectionName": "[town]",
+          "lstFileNames": [
+            "wown"
+          ],
+          "description": "城镇"
+        }
+      ]
+    },
+    {
+      "fileName": "*.mob",
+      "sections": [
+        {
+          "sectionName": "[item]",
+          "lstFileNames": [
+            "tackable",
+            "equipment"
+          ],
+          "description": "道具/装备"
+        }
+      ]
+    },
+    {
+      "fileName": "*.qst",
+      "sections": [
+        {
+          "sectionName": "[npc index]",
+          "lstFileNames": [
+            "npc"
+          ],
+          "description": "NPC"
+        },
+        {
+          "sectionName": "[complete npc index]",
+          "lstFileNames": [
+            "npc"
+          ],
+          "description": "NPC"
+        },
+        {
+          "sectionName": "[pre required quest]",
+          "lstFileNames": [
+            "n_quest"
+          ],
+          "description": "任务"
+        },
+        {
+          "sectionName": "[limit dungeon index]",
+          "lstFileNames": [
+            "dungeon"
+          ],
+          "description": "副本"
+        },
+        {
+          "sectionName": "[appear map]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "dungeon"
+          ],
+          "description": "副本"
+        },
+        {
+          "sectionName": "[depend give item]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备"
+        },
+        {
+          "sectionName": "[dungeon info]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "dungeon"
+          ],
+          "description": "副本"
+        },
+        {
+          "sectionName": "[reward int data]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备"
+        },
+        {
+          "sectionName": "[int data]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备",
+          "validations": [
+            {
+              "sectionName": "[type]",
+              "value": "`[seeking]`"
+            }
+          ]
+        },
+        {
+          "sectionName": "[int data]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "dungeon"
+          ],
+          "description": "副本",
+          "validations": [
+            {
+              "sectionName": "[type]",
+              "value": "`[condition under clear]`"
+            }
+          ]
+        }
+      ],
+      "sectionGroups": [
+        {
+          "sectionName": "[int data]",
+          "indexes": [
+            {
+              "value": 0,
+              "lstFileNames": [
+                "dungeon"
+              ],
+              "description": "副本"
+            },
+            {
+              "value": 2,
+              "lstFileNames": [
+                "monster"
+              ],
+              "description": "怪物"
+            }
+          ],
+          "validations": [
+            {
+              "sectionName": "[type]",
+              "value": "`[hunt monster]`"
+            }
+          ]
+        },
+        {
+          "sectionName": "[int data]",
+          "indexes": [
+            {
+              "value": 0,
+              "lstFileNames": [
+                "dungeon"
+              ],
+              "description": "副本"
+            },
+            {
+              "value": 2,
+              "lstFileNames": [
+                "monster"
+              ],
+              "description": "怪物"
+            }
+          ],
+          "validations": [
+            {
+              "sectionName": "[sub type]",
+              "value": "0"
+            },
+            {
+              "sectionName": "[type]",
+              "value": "`[clear map]`"
+            }
+          ]
+        },
+        {
+          "sectionName": "[monster reward item]",
+          "indexes": [
+            {
+              "value": 0,
+              "lstFileNames": [
+                "monster"
+              ],
+              "description": "怪物"
+            },
+            {
+              "value": 1,
+              "lstFileNames": [
+                "dungeon"
+              ],
+              "description": "副本"
+            },
+            {
+              "value": 3,
+              "lstFileNames": [
+                "stackable",
+                "equipment"
+              ],
+              "description": "物品/装备"
+            }
+          ]
+        },
+        {
+          "sectionName": "[clear reward item]",
+          "indexes": [
+            {
+              "value": 0,
+              "lstFileNames": [
+                "dungeon"
+              ],
+              "description": "副本"
+            },
+            {
+              "value": 2,
+              "lstFileNames": [
+                "stackable",
+                "equipment"
+              ],
+              "description": "物品/装备"
+            }
+          ]
+        },
+        {
+          "sectionName": "[enemy reward item]",
+          "indexes": [
+            {
+              "value": 2,
+              "lstFileNames": [
+                "Dungeon"
+              ],
+              "description": "副本"
+            },
+            {
+              "value": 4,
+              "lstFileNames": [
+                "stackable",
+                "equipment"
+              ],
+              "description": "物品/装备"
+            }
+          ]
+        },
+        {
+          "sectionName": "[dialog]",
+          "indexes": [
+            {
+              "value": 2,
+              "lstFileNames": [
+                "dungeon",
+                "map"
+              ],
+              "description": "副本/地图"
+            },
+            {
+              "value": 5,
+              "lstFileNames": [
+                "monster",
+                "aicharacter"
+              ],
+              "description": "怪物/APC"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "fileName": "*.shp",
+      "sections": [
+        {
+          "sectionName": "[NPC]",
+          "lstFileNames": [
+            "npc"
+          ],
+          "description": "NPC"
+        },
+        {
+          "sectionName": "[sell item]",
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备"
+        }
+      ]
+    },
+    {
+      "fileName": "*.stk",
+      "sections": [
+        {
+          "sectionName": "[etc]",
+          "parentSectionName": "[booster select category]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备"
+        },
+        {
+          "sectionName": "[etc]",
+          "parentSectionName": "[booster info]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备2"
+        },
+        {
+          "sectionName": "[equipment]",
+          "parentSectionName": "[booster select category]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "equipment"
+          ],
+          "description": "装备"
+        }
+      ]
+    },
+    {
+      "fileName": "etc/worlddrop.etc",
+      "sections": [
+        {
+          "sectionName": "[world drop]",
+          "indexes": [
+            0
+          ],
+          "lstFileNames": [
+            "stackable",
+            "equipment"
+          ],
+          "description": "物品/装备 妈咪妈咪哄"
+        }
+      ]
+    }
+  ]
+}

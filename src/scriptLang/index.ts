@@ -17,6 +17,7 @@ import { registerKeyLanguage } from './key/registerKey';
 import { registerKeyFormatter } from './key/formatter';
 import { registerScriptTagCommentEditor } from './tagCommentEditor';
 import { registerGenericScriptTagLanguages } from './genericTags';
+import { registerItemCodeHover } from './itemCodeHover';
 
 // 未来可扩展：扫描 scriptTags 下的定义动态生成补全与 hover。
 export function registerScriptLanguages(context: vscode.ExtensionContext, model?: any) {
@@ -39,4 +40,5 @@ export function registerScriptLanguages(context: vscode.ExtensionContext, model?
     registerAicFormatter(context);
     registerKeyLanguage(context);
     registerKeyFormatter(context);
+    registerItemCodeHover(context);
 }
