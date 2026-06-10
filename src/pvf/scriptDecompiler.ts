@@ -2,6 +2,27 @@ import { PvfFile } from './pvfFile';
 import { StringView } from './stringView';
 import { StringTable } from './stringTable';
 
+const SKILL_DATA_ROW_CLASSES = new Set<string>([
+  '[all]',
+  '[swordman]',
+  '[at swordman]',
+  '[demonic swordman]',
+  '[fighter]',
+  '[at fighter]',
+  '[gunner]',
+  '[at gunner]',
+  '[mage]',
+  '[at mage]',
+  '[priest]',
+  '[at priest]',
+  '[thief]',
+  '[knight]',
+  '[demoniclancer]',
+  '[gunblader]',
+  '[dark knight]',
+  '[creator]',
+]);
+
 function formatFloat(n: number): string {
   // keep two decimals consistent with ANI policy? Use trim trailing zeros if needed
   const s = n.toFixed(6);
@@ -37,6 +58,21 @@ export function decompileScript(model: any, f: PvfFile): string {
     return false;
   };
 
+  const sectionNameAt = (idx: number): string | null => {
+    if (idx < 0 || idx >= types.length || types[idx] !== 5) return null;
+    return getStr(values[idx]);
+  };
+
+  const openingNameForClosing = (nameLower: string): string => '[' + nameLower.slice(2);
+
+  const closableSections = new Set<string>();
+  for (let idx = 0; idx < types.length; idx++) {
+    const name = sectionNameAt(idx);
+    if (name?.startsWith('[/')) {
+      closableSections.add(openingNameForClosing(name.toLowerCase()));
+    }
+  }
+
   const scratchView = new DataView(new ArrayBuffer(4));
   const toFloat32 = (v: number): number => {
     scratchView.setUint32(0, v, true);
@@ -52,11 +88,9 @@ export function decompileScript(model: any, f: PvfFile): string {
 
   let i = 0;
   let currentSection: string | null = null;
+  let currentSectionIsContainer = false;
   let indentLevel = 0; // container depth only
   let firstSection = false;
-  const containerSections = new Set<string>([
-    '[dungeon]','[pvp]','[death tower]','[warroom]'
-  ]);
   const sectionStack: string[] = []; // stack of container section names (lowercase)
 
   const floatForSection = (sec: string | null, n: number): string => {
@@ -72,6 +106,53 @@ export function decompileScript(model: any, f: PvfFile): string {
     sb.push('\t'.repeat(indentLevel + extraIndent) + content);
   };
 
+  const dataExtraIndent = () => currentSectionIsContainer ? 0 : 1;
+
+  const emitDataLine = (content: string) => {
+    emitLine(content, dataExtraIndent());
+  };
+
+  const renderStringLink = (id: number, nameIdx: number): string => {
+    const nameRaw = getStr(nameIdx);
+    const val = getStrLink(id, nameIdx) || nameRaw;
+    return showSimplified
+      ? '`' + val + '`'
+      : '<' + id + '::' + nameRaw + '`' + val + '`>';
+  };
+
+  const renderToken = (idx: number): { text: string; next: number } => {
+    const itType = types[idx];
+    const itValue = values[idx];
+    if (itType === 7) return { text: '`' + getStr(itValue) + '`', next: idx + 1 };
+    if (itType === 9 && idx + 1 < types.length && types[idx + 1] === 10) {
+      return { text: renderStringLink(itValue, values[idx + 1]), next: idx + 2 };
+    }
+    if (itType === 4) return { text: floatForSection(currentSection, itValue), next: idx + 1 };
+    return { text: formatNumberToken(itType, itValue), next: idx + 1 };
+  };
+
+  const isSkillDataRowStart = (idx: number): boolean => {
+    if (idx < 0 || idx + 2 >= types.length || types[idx] !== 7) return false;
+    const className = getStr(values[idx]).toLowerCase();
+    if (SKILL_DATA_ROW_CLASSES.has(className)) return true;
+    if (!/^\[[^\]]+\]$/.test(className)) return false;
+    const nextType = types[idx + 1];
+    if (nextType !== 2 && nextType !== 3 && nextType !== 4) return false;
+    return types[idx + 2] === 7 && getStr(values[idx + 2]).toLowerCase() === '[dungeon type]';
+  };
+
+  const readSkillDataRow = (start: number): { line: string; next: number } => {
+    const parts: string[] = [];
+    let j = start;
+    while (j < types.length && !isSection(types[j], values[j])) {
+      if (j > start && isSkillDataRowStart(j)) break;
+      const rendered = renderToken(j);
+      parts.push(rendered.text);
+      j = rendered.next;
+    }
+    return { line: parts.join('\t'), next: j };
+  };
+
   while (i < types.length) {
     const t = types[i];
     const v = values[i];
@@ -81,17 +162,16 @@ export function decompileScript(model: any, f: PvfFile): string {
       const closing = name.startsWith('[/');
       if (closing) {
         // map closing '[/xxx]' -> '[xxx]'
-        const openName = '[' + nameLower.slice(2);
+        const openName = openingNameForClosing(nameLower);
         if (sectionStack.length && sectionStack[sectionStack.length - 1] === openName) {
           // reduce indent BEFORE printing closing at same level as its opener
           indentLevel = Math.max(0, indentLevel - 1);
           sectionStack.pop();
         }
-        if (!firstSection) { sb.push(''); firstSection = true; }
-        else if (indentLevel === 0) { sb.push(''); }
         emitLine(name);
         // leaving a section: reset leaf section context
-        currentSection = null;
+        currentSection = sectionStack.length ? sectionStack[sectionStack.length - 1] : null;
+        currentSectionIsContainer = currentSection !== null;
         i++; continue;
       }
       // opening section
@@ -99,7 +179,8 @@ export function decompileScript(model: any, f: PvfFile): string {
       else if (indentLevel === 0) { sb.push(''); }
       emitLine(name);
       currentSection = nameLower; // leaf context
-      if (containerSections.has(nameLower)) {
+      currentSectionIsContainer = closableSections.has(nameLower);
+      if (currentSectionIsContainer) {
         indentLevel++;
         sectionStack.push(nameLower);
       }
@@ -112,24 +193,17 @@ export function decompileScript(model: any, f: PvfFile): string {
         const strVal = getStr(v);
         if (strVal.startsWith('#')) {
           const signed = new DataView(new Uint32Array([v]).buffer).getInt32(0, true);
-          emitLine('{' + t + '=' + signed + '}', 1);
+          emitDataLine('{' + t + '=' + signed + '}');
         } else {
-          emitLine('{' + t + '=`' + strVal + '`}', 1);
+          emitDataLine('{' + t + '=`' + strVal + '`}');
         }
         i++; continue;
       }
       if (t === 7) {
-        emitLine('`' + getStr(v) + '`', 1); i++; continue;
+        emitDataLine('`' + getStr(v) + '`'); i++; continue;
       }
       if (t === 9 && i + 1 < types.length && types[i + 1] === 10) {
-        const nameIdx = values[i + 1];
-        const nameRaw = getStr(nameIdx);
-        const val = getStrLink(v, nameIdx) || nameRaw;
-        if (showSimplified) {
-          emitLine('`' + val + '`', 1);
-        } else {
-          emitLine('<' + v + '::' + nameRaw + '`' + val + '`>', 1);
-        }
+        emitDataLine(renderStringLink(v, values[i + 1]));
         i += 2; continue;
       }
       // 其它数字：聚合一行
@@ -139,17 +213,20 @@ export function decompileScript(model: any, f: PvfFile): string {
         if (itType === 6 || itType === 7 || itType === 8 || itType === 9) break;
         nums.push(formatNumberToken(itType, values[i])); i++;
       }
-      if (nums.length) emitLine(nums.join('\t'), 1);
+      if (nums.length) emitDataLine(nums.join('\t'));
+      continue;
+    }
+
+    if (currentSection === '[skill data up]') {
+      const row = readSkillDataRow(i);
+      if (row.line) emitDataLine(row.line);
+      i = row.next;
       continue;
     }
 
     // string link 9+10
     if (t === 9 && i + 1 < types.length && types[i + 1] === 10) {
-      const nameIdx = values[i + 1];
-      const nameRaw = getStr(nameIdx);
-      const val = getStrLink(v, nameIdx) || nameRaw;
-      if (showSimplified) emitLine('`' + val + '`', 1);
-      else emitLine('<' + v + '::' + nameRaw + '`' + val + '`>', 1);
+      emitDataLine(renderStringLink(v, values[i + 1]));
       i += 2; continue;
     }
     // string 7 + 后续数字
@@ -162,8 +239,8 @@ export function decompileScript(model: any, f: PvfFile): string {
         if (jt === 4) nums.push(floatForSection(currentSection, values[j])); else nums.push(formatNumberToken(jt, values[j]));
         j++;
       }
-      if (nums.length) emitLine('`' + strVal + '`\t' + nums.join('\t'), 1);
-      else emitLine('`' + strVal + '`', 1);
+      if (nums.length) emitDataLine('`' + strVal + '`\t' + nums.join('\t'));
+      else emitDataLine('`' + strVal + '`');
       i = j; continue;
     }
     // 纯数字行（聚合直到控制 token）
@@ -174,7 +251,10 @@ export function decompileScript(model: any, f: PvfFile): string {
       if (kt === 4) line.push(floatForSection(currentSection, kv)); else line.push(formatNumberToken(kt, kv));
       i++;
     }
-    if (line.length) emitLine(line.join('\t'), 1);
+    if (line.length) {
+      const trailingTab = currentSection === '[piece set ability]' && line.length === 1 ? '\t' : '';
+      emitDataLine(line.join('\t') + trailingTab);
+    }
   }
-  return sb.join('\n');
+  return sb.join('\r\n');
 }

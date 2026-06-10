@@ -14,6 +14,118 @@ import { setPvfModel } from './pvf/runtimeModel';
 import getPvfContent, { getIconBase64ByCode , getNameByCodeAndLst , parsePvfScriptToJson} from './pvf/services/getPvfContent';
 import getIconFrameBase64 from './pvf/services/getIconFrame';
 import { registerStringTableCodeLens } from './pvf/services/stringTableCodeLens';
+import { scriptTagLanguageIdForPath } from './scriptLang/genericTags';
+
+function isPvfScriptDocument(doc: vscode.TextDocument): boolean {
+    return doc.languageId.startsWith('pvf-') || !!scriptTagLanguageIdForPath(doc.uri.fsPath || doc.fileName);
+}
+
+function registerPvfVisibleTabMarkers(context: vscode.ExtensionContext) {
+    const tabDecoration = vscode.window.createTextEditorDecorationType({
+        rangeBehavior: vscode.DecorationRangeBehavior.OpenOpen,
+        before: {
+            contentText: '→',
+            color: new vscode.ThemeColor('editorLineNumber.foreground'),
+            margin: '0 -1ch 0 0',
+        },
+    });
+
+    const update = (editor: vscode.TextEditor | undefined) => {
+        if (!editor) return;
+        const doc = editor.document;
+        if (!isPvfScriptDocument(doc)) {
+            editor.setDecorations(tabDecoration, []);
+            return;
+        }
+
+        const ranges: vscode.Range[] = [];
+        for (const visible of editor.visibleRanges) {
+            const startLine = Math.max(0, visible.start.line);
+            const endLine = Math.min(doc.lineCount - 1, visible.end.line);
+            for (let lineNo = startLine; lineNo <= endLine; lineNo++) {
+                const text = doc.lineAt(lineNo).text;
+                let index = text.indexOf('\t');
+                while (index >= 0) {
+                    ranges.push(new vscode.Range(lineNo, index, lineNo, index));
+                    index = text.indexOf('\t', index + 1);
+                }
+            }
+        }
+        editor.setDecorations(tabDecoration, ranges);
+    };
+
+    const updateAll = () => {
+        for (const editor of vscode.window.visibleTextEditors) update(editor);
+    };
+
+    updateAll();
+    context.subscriptions.push(
+        tabDecoration,
+        vscode.window.onDidChangeActiveTextEditor(editor => update(editor)),
+        vscode.window.onDidChangeVisibleTextEditors(() => updateAll()),
+        vscode.window.onDidChangeTextEditorVisibleRanges(event => update(event.textEditor)),
+        vscode.workspace.onDidChangeTextDocument(event => {
+            for (const editor of vscode.window.visibleTextEditors) {
+                if (editor.document === event.document) update(editor);
+            }
+        }),
+    );
+
+    return { update, updateAll };
+}
+
+async function applyPvfLanguageAndVisibleTabs(
+    editor: vscode.TextEditor | undefined,
+    output: vscode.OutputChannel,
+    updateTabMarkers?: (editor: vscode.TextEditor | undefined) => void,
+) {
+    if (!editor) return;
+    const doc = editor.document;
+    if (doc.uri.scheme !== 'file' && doc.uri.scheme !== 'pvf') return;
+    const languageId = scriptTagLanguageIdForPath(doc.uri.fsPath || doc.fileName);
+    if (!languageId && !doc.languageId.startsWith('pvf-')) return;
+
+    if (languageId && doc.languageId !== languageId) {
+        try {
+            await vscode.languages.setTextDocumentLanguage(doc, languageId);
+        } catch (err) {
+            output.appendLine(`[PVF] failed to set language ${languageId} for ${doc.uri.toString()}: ${String(err)}`);
+            return;
+        }
+    }
+
+    const options = editor.options;
+    const patch: vscode.TextEditorOptions = {};
+    if (options.tabSize !== 4) patch.tabSize = 4;
+    if (options.insertSpaces !== false) patch.insertSpaces = false;
+    if (Object.keys(patch).length > 0) {
+        editor.options = { ...options, ...patch };
+    }
+    updateTabMarkers?.(editor);
+}
+
+function registerPvfDiskFileLanguageActivation(
+    context: vscode.ExtensionContext,
+    output: vscode.OutputChannel,
+    updateTabMarkers?: (editor: vscode.TextEditor | undefined) => void,
+) {
+    const applyVisibleEditors = () => {
+        for (const editor of vscode.window.visibleTextEditors) {
+            void applyPvfLanguageAndVisibleTabs(editor, output, updateTabMarkers);
+        }
+    };
+    applyVisibleEditors();
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(editor => {
+            void applyPvfLanguageAndVisibleTabs(editor, output, updateTabMarkers);
+        }),
+        vscode.window.onDidChangeVisibleTextEditors(() => applyVisibleEditors()),
+        vscode.workspace.onDidOpenTextDocument(doc => {
+            const editor = vscode.window.visibleTextEditors.find(item => item.document === doc);
+            if (editor) void applyPvfLanguageAndVisibleTabs(editor, output, updateTabMarkers);
+        }),
+    );
+}
 
 export function activate(context: vscode.ExtensionContext) {
     const model = new PvfModel();
@@ -23,6 +135,8 @@ export function activate(context: vscode.ExtensionContext) {
     const output = vscode.window.createOutputChannel('PVF');
     const tree = new PvfProvider(model, output);
     const deco = registerPvfDecorations(context, model);
+    const tabMarkers = registerPvfVisibleTabMarkers(context);
+    registerPvfDiskFileLanguageActivation(context, output, tabMarkers.update);
     // 图标逻辑：在 provider 中通过 vscode.extensions.getExtension 查找当前扩展根路径，从 media/icons 读取 png
     // 若需要在运行时修改映射，可暴露命令以动态刷新（后续可扩展）
 

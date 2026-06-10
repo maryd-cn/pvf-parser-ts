@@ -1,5 +1,29 @@
 import { PvfModel } from './model';
 
+interface SourceLine {
+  text: string;
+  eol: string;
+}
+
+function splitLinesPreserveEol(text: string): SourceLine[] {
+  const lines: SourceLine[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\r' || ch === '\n' || ch === '\u2028' || ch === '\u2029') {
+      let eol = ch;
+      if (ch === '\r' && text[i + 1] === '\n') {
+        eol = '\r\n';
+        i++;
+      }
+      lines.push({ text: text.slice(start, i + 1 - eol.length), eol });
+      start = i + 1;
+    }
+  }
+  lines.push({ text: text.slice(start), eol: '' });
+  return lines;
+}
+
 export class ScriptCompiler {
   constructor(private model: PvfModel) { }
   compile(scriptText: string): Buffer | null {
@@ -18,12 +42,10 @@ export class ScriptCompiler {
         }
       } catch { /* ignore config errors */ }
       const out: number[] = [0xB0, 0xD0];
-      // 统一换行
-      const normalized = scriptText.replace(/\r\n?|\u2028|\u2029/g, '\n');
-      const lines = normalized.split('\n');
+      const lines = splitLinesPreserveEol(scriptText);
       let i = 0;
       while (i < lines.length) {
-        let line = lines[i];
+        let line = lines[i].text;
         const trimmed = line.trim();
         if (!trimmed || /^#pvf_file(_add)?$/i.test(trimmed)) { i++; continue; }
         // 逐字符扫描，支持多行反引号串与制表分隔 token
@@ -47,6 +69,7 @@ export class ScriptCompiler {
             pos++;
             let closed = false;
             let curLine = line;
+            let curLineIndex = i;
             while (true) {
               while (pos < curLine.length) {
                 const ch = curLine[pos++];
@@ -54,11 +77,14 @@ export class ScriptCompiler {
                 if (ch === '`') { closed = true; break; }
               }
               if (closed) break;
-              // 下一行继续
-              i++;
-              if (i >= lines.length) break; // 非正常闭合，直接退出
-              curLine = lines[i];
-              token += '\n';
+              // 下一行继续。反引号内的换行属于字符串内容，必须按原文保留。
+              const eol = lines[curLineIndex].eol;
+              if (!eol) break; // 非正常闭合，直接退出
+              token += eol;
+              curLineIndex++;
+              i = curLineIndex;
+              if (i >= lines.length) break;
+              curLine = lines[i].text;
               pos = 0;
             }
             // 如果闭合所在行还有剩余，继续在同一逻辑里处理余下部分
