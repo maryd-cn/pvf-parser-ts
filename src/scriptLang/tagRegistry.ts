@@ -11,6 +11,110 @@ function sanitizeMarkdown(markdown: string): string {
     return markdown.replace(/\]\(\s*command:[^)]+\)/gi, '](#)');
 }
 
+function normalizeLooseHeading(line: string): string {
+    return line.replace(/^(#{1,6})([^\s#].*)$/, '$1 $2');
+}
+
+function isMarkdownTableRow(line: string): boolean {
+    return /^\s*\|?.+\|.+\|?\s*$/.test(line);
+}
+
+function isMarkdownTableDivider(line: string): boolean {
+    return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function splitMarkdownTableRow(row: string): string[] {
+    return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim());
+}
+
+function markdownTableText(rows: string[][]): string {
+    const header = rows[0] || [];
+    const body = rows.slice(1);
+    const width = Math.max(header.length, ...body.map(row => row.length));
+    const normalize = (row: string[]) => {
+        const cells = row.slice(0, width);
+        while (cells.length < width) cells.push('');
+        return `| ${cells.join(' | ')} |`;
+    };
+    return [
+        normalize(header),
+        `| ${Array.from({ length: width }, () => '---').join(' | ')} |`,
+        ...body.map(normalize)
+    ].join('\n');
+}
+
+function displayWidth(value: string): number {
+    let width = 0;
+    for (const ch of value) {
+        width += ch.charCodeAt(0) > 0xff ? 2 : 1;
+    }
+    return width;
+}
+
+function padCell(value: string, width: number): string {
+    return value + ' '.repeat(Math.max(0, width - displayWidth(value)));
+}
+
+function codeTableText(rows: string[][]): string {
+    const header = rows[0] || [];
+    const body = rows.slice(1);
+    const columnCount = Math.max(header.length, ...body.map(row => row.length));
+    const normalizedRows = rows.map(row => {
+        const cells = row.slice(0, columnCount);
+        while (cells.length < columnCount) cells.push('');
+        return cells;
+    });
+    const widths = Array.from({ length: columnCount }, (_, column) => {
+        return Math.max(3, ...normalizedRows.map(row => displayWidth(row[column] || '')));
+    });
+    const border = '+' + widths.map(width => '-'.repeat(width + 2)).join('+') + '+';
+    const renderRow = (row: string[]) => '| ' + row.map((cell, column) => padCell(cell, widths[column])).join(' | ') + ' |';
+    const out = [border, renderRow(normalizedRows[0] || []), border];
+    for (const row of normalizedRows.slice(1)) {
+        out.push(renderRow(row));
+    }
+    out.push(border);
+    return out.map(line => '    ' + line).join('\n');
+}
+
+function readMarkdownTable(lines: string[], start: number): { rows: string[][]; next: number } | undefined {
+    if (start + 1 >= lines.length) return undefined;
+    if (!isMarkdownTableRow(lines[start]) || !isMarkdownTableDivider(lines[start + 1])) return undefined;
+    const rows = [splitMarkdownTableRow(lines[start])];
+    let i = start + 2;
+    while (i < lines.length && isMarkdownTableRow(lines[i])) {
+        rows.push(splitMarkdownTableRow(lines[i]));
+        i++;
+    }
+    return { rows, next: i };
+}
+
+function formatCommentMarkdown(markdown: string, options?: { tableStyle?: 'markdown' | 'code' }): string {
+    const lines = sanitizeMarkdown(markdown).replace(/\r\n?/g, '\n').split('\n');
+    const out: string[] = [];
+    let inFence = false;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (/^\s*(```|~~~)/.test(line)) {
+            inFence = !inFence;
+            out.push(line);
+            continue;
+        }
+        if (!inFence) {
+            const table = readMarkdownTable(lines, i);
+            if (table) {
+                out.push(options?.tableStyle === 'code' ? codeTableText(table.rows) : markdownTableText(table.rows));
+                i = table.next - 1;
+                continue;
+            }
+            out.push(normalizeLooseHeading(line));
+        } else {
+            out.push(line);
+        }
+    }
+    return out.join('\n');
+}
+
 function escapeMarkdownTableCell(value: string): string {
     return value.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
@@ -29,7 +133,7 @@ function tagDocumentationMarkdown(description: string | undefined, options?: { t
     if (!description && !options?.trustEditCommand) return undefined;
     const md = new vscode.MarkdownString(undefined, true);
     if (description) {
-        md.appendMarkdown(sanitizeMarkdown(description));
+        md.appendMarkdown(formatCommentMarkdown(description));
     }
     if (options?.trustEditCommand && options.short && options.name) {
         md.supportThemeIcons = true;
@@ -235,7 +339,7 @@ export function provideSharedTagFeatures(context: vscode.ExtensionContext, langI
                     md.isTrusted = { enabledCommands: ['pvf.editScriptTagComment'] };
                     md.appendCodeblock(tag.name, langId);
                     if (tag.description) {
-                        md.appendMarkdown('\n\n' + sanitizeMarkdown(tag.description));
+                        md.appendMarkdown('\n\n' + formatCommentMarkdown(tag.description, { tableStyle: 'code' }));
                     } else if (!tags.some(x => x.name.toLowerCase() === t.rawName.toLowerCase())) {
                         md.appendMarkdown('\n\n未找到标签注释。');
                     }

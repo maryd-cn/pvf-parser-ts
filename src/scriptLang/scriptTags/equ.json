@@ -504,7 +504,7 @@
     },
     {
       "name": "animation job",
-      "description": "#职业动画\n\n|字段|职业|\n|----- | ----- |\n|[swordman] | 鬼剑士|\n|[demonic swordman] | 黑暗武士|\n|[fighter] | 格斗家(女)|\n|[at fighter] | 格斗家(男)|\n|[gunner] | 神枪手(男)|\n|[at gunner] |神枪手(女)|\n|[mage]| 魔法师(女)|\n|[at mage]|魔法师(男)|\n|[thief]|暗夜使者|\n|[at swordman]|女鬼剑|",
+      "description": "### 职业动画\n\n| 字段 | 职业 |\n| --- | --- |\n| [swordman] | 鬼剑士 |\n| [demonic swordman] | 黑暗武士 |\n| [fighter] | 格斗家(女) |\n| [at fighter] | 格斗家(男) |\n| [gunner] | 神枪手(男) |\n| [at gunner] | 神枪手(女) |\n| [mage] | 魔法师(女) |\n| [at mage] | 魔法师(男) |\n| [thief] | 暗夜使者 |\n| [at swordman] | 女鬼剑 |",
       "authors": "Cai - 263007544|Xiti Fox|Lancarus"
     },
     {

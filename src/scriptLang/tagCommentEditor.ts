@@ -266,8 +266,29 @@ textarea {
     padding-left: 12px;
     color: var(--muted);
 }
-.preview table { border-collapse: collapse; width: 100%; margin: 0 0 12px; }
-.preview th, .preview td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.preview table {
+    --table-border: var(--border);
+    --table-head: var(--panel);
+    --table-stripe: var(--input);
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0 0 12px;
+    border: 1px solid var(--table-border);
+}
+.preview th, .preview td {
+    border: 1px solid var(--table-border);
+    padding: 6px 9px;
+    text-align: left;
+}
+.preview th { background: var(--table-head); font-weight: 600; }
+.preview tbody tr:nth-child(even) { background: var(--table-stripe); }
+@supports (color: color-mix(in srgb, white, black)) {
+    .preview table {
+        --table-border: color-mix(in srgb, var(--border) 78%, var(--fg) 22%);
+        --table-head: color-mix(in srgb, var(--panel) 86%, var(--fg) 14%);
+        --table-stripe: color-mix(in srgb, var(--input) 90%, var(--fg) 10%);
+    }
+}
 .preview a { color: var(--vscode-textLink-foreground); }
 .preview img { max-width: 100%; }
 .status {
@@ -420,7 +441,7 @@ function renderMarkdown(source) {
             continue;
         }
 
-        const heading = /^(#{1,4})\\s+(.+)$/.exec(line);
+        const heading = /^(#{1,4})(?:\\s+|(?=[^\\s#]))(.+)$/.exec(line);
         if (heading) {
             closeList();
             const level = heading[1].length;
