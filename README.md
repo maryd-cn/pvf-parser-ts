@@ -8,6 +8,7 @@
 
 - **PVF 资源浏览器** — 侧边栏树形视图，可浏览 PVF 包内文件。支持新建、删除、重命名、剪切/复制/粘贴文件和文件夹。
 - **虚拟文件系统** — 将包内文件以常规编辑器标签页（`pvf://` 协议）打开。编辑会被跟踪，可保存回封包。
+- **目录解封 / 重新封装** — 可将 PVF 解封到普通目录，脚本、`stringtable.bin`、`.ani` 和已知文本文件会写成 UTF-8 文本，二进制资源原样保留；目录可再封装回 PVF。
 - **原地保存 / 另存为** — 支持直接保存或另存为新 PVF 文件。
 - **脚本语言支持** — 语法高亮、自动补全、悬停提示和格式化，覆盖以下文件类型：
   - `.act`（动作）、`.ani`（动画）、`.skl`（技能）
@@ -42,6 +43,31 @@
 | `pvf.metadata.excludeExtensions` | （见默认值） | 扫描 `[name]` 标签时要排除的扩展名 |
 | `pvf.script.convertStringLink` | `true` | 自动将字符串链接 `<id::name\`text\`>` 转换为 `text` |
 | `pvf.closeVirtualEditorsOnStartup` | `true` | 启动时自动关闭上次遗留的 `pvf:` 虚拟文件标签页 |
+
+## 目录工作流
+
+1. 在 PVF 面板打开封包后执行 **解封PVF到目录**，选择目标目录。
+2. 插件会写出完整目录结构和 `.pvfmanifest.json`。不要删除该 manifest，它记录原始编码、文件类型和 PVF 头信息，重新封装时用于区分脚本、二进制 ANI、文本和普通二进制。
+3. 在普通工作区中编辑解封后的文件。可编辑文本统一为 UTF-8；二进制文件不要用文本编辑器改写。
+4. 执行 **将目录封装为PVF**，选择解封目录并指定输出 `.pvf` 文件。
+
+解封和封装均采用受控并发处理，适合几十万小文件的 PVF 包；实际速度主要受磁盘随机写入性能、杀毒软件扫描和文本反编译/编译比例影响。
+
+### 大包性能调优
+
+解封/封装完成后会在 **PVF 输出面板**打印阶段耗时，例如 `prepare/mkdir/pipelineWrite/manifest`。如果 `pipelineWrite` 占绝大多数时间，瓶颈是 Windows 小文件写盘、杀毒扫描或 VS Code/Git 文件监听，不是 PVF 解析。
+
+可在设置中调整：
+
+| 设置项 | 默认值 | 说明 |
+|---------|---------|------|
+| `pvf.unpack.writeConcurrency` | `512` | 解封时并发写文件数量。SSD/NVMe 可试 `256-512`，机械盘建议 `64-128`。 |
+| `pvf.unpack.workerCount` | `12` | 解封写盘 worker 数量。不同磁盘差异很大，可试 `8/12/16`；机械盘可降低。 |
+| `pvf.unpack.writeBatchSize` | `64` | 每个 worker 消息包含的文件数量。小文件很多时建议 `64-128`。 |
+| `pvf.unpack.mkdirConcurrency` | `128` | 并发创建目录数量。 |
+| `pvf.repack.readConcurrency` | `192` | 重新封装时并发读取和转换文件数量。 |
+
+目标目录建议放在 SSD/NVMe 上，并尽量不要选在当前 VS Code 工作区或 Git 仓库内部；否则 VS Code 文件监听、搜索索引、Git 扫描和 Windows Defender 可能会显著拖慢 36 万个小文件的创建。
 
 ## 开发
 

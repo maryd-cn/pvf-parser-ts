@@ -209,6 +209,41 @@
           "type": "boolean",
           "default": true,
           "description": "解析器 :: 自动转换字符串链接 <id::name`文字`> 为 `文字`。关闭后仍保留链接形式 (文本被清空为 `` )。"
+        },
+        "pvf.unpack.writeConcurrency": {
+          "type": "number",
+          "default": 512,
+          "minimum": 1,
+          "maximum": 2048,
+          "description": "解封 PVF 时并发写文件数量。机械硬盘建议 64-128，SSD/NVMe 可尝试 256-512。"
+        },
+        "pvf.unpack.workerCount": {
+          "type": "number",
+          "default": 12,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "解封 PVF 时用于写盘的 worker 数量。0 表示使用 Node 默认异步写入；不同磁盘差异很大，可尝试 8/12/16。"
+        },
+        "pvf.unpack.writeBatchSize": {
+          "type": "number",
+          "default": 64,
+          "minimum": 1,
+          "maximum": 512,
+          "description": "解封 PVF 时每个 worker 消息包含的文件数量。小文件很多时建议 64-128。"
+        },
+        "pvf.unpack.mkdirConcurrency": {
+          "type": "number",
+          "default": 128,
+          "minimum": 1,
+          "maximum": 1024,
+          "description": "解封 PVF 时并发创建目录数量。"
+        },
+        "pvf.repack.readConcurrency": {
+          "type": "number",
+          "default": 192,
+          "minimum": 1,
+          "maximum": 1024,
+          "description": "将目录封装为 PVF 时并发读取/转换文件数量。"
         }
       }
     },

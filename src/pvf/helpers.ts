@@ -33,6 +33,39 @@ export function encodingForKey(key: string): string {
   }
 }
 
+/** 与 encodingForKey 相同，但接受显式编码模式参数（供 repack 使用，不依赖 VS Code 配置） */
+export function encodingForKeyWithMode(key: string, mode: string, autoFallback = 'big5'): string {
+  const lower = key.toLowerCase();
+  if (lower.endsWith('.nut')) return 'cp949';
+  const m = (mode || 'big5').toUpperCase();
+  switch (m) {
+    case 'KR': return 'cp949';
+    case 'TW': return 'big5';
+    case 'CN': return 'gb18030';
+    case 'JP': return 'shift_jis';
+    case 'UTF8': return 'utf8';
+    case 'AUTO':
+      return autoFallback || 'big5';
+    default: return 'big5';
+  }
+}
+
+/** 文本文件扩展名（非脚本），解封/封装时做编码转换 */
+export function isTextByExtensionForExport(lowerKey: string): boolean {
+  return lowerKey.endsWith('.nut')
+    || lowerKey.endsWith('.als')
+    || lowerKey.endsWith('.txt')
+    || lowerKey.endsWith('.cfg')
+    || lowerKey.endsWith('.def')
+    || lowerKey.endsWith('.inc')
+    || lowerKey.endsWith('.xml')
+    || lowerKey.endsWith('.ui')
+    || lowerKey.endsWith('.css')
+    || lowerKey.endsWith('.js')
+    || lowerKey.endsWith('.json')
+    || lowerKey.endsWith('.csv');
+}
+
 // Text-like extensions
 export function isTextByExtension(lowerKey: string): boolean {
   return lowerKey.endsWith('.skl')

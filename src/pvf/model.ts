@@ -7,13 +7,25 @@ import { StringTable } from './stringTable';
 import { ScriptCompiler } from './scriptCompiler';
 import { StringView } from './stringView';
 import { openImpl, saveImpl, readAndDecryptImpl } from './modelIO';
+import { performance } from 'perf_hooks';
 import { decompileBinaryAni } from './binaryAni';
 import { compileBinaryAni } from './aniCompiler';
-import { encodingForKey, isTextByExtension, detectEncoding, isTextEncoding, isPrintableText } from './helpers';
+import { encodingForKey, isTextByExtension, detectEncoding, isTextEncoding, isPrintableText, isTextByExtensionForExport } from './helpers';
 import { getFileNameHashCode as utilGetFileNameHashCode, renderStringTableText as utilRenderStringTableText } from './util';
 import { decompileScript } from './scriptDecompiler';
-import { decompileLst } from './lstDecompiler';
+import { compileLstText, decompileLst } from './lstDecompiler';
 import { buildMetadataMaps, parseMetadataForKeys } from './metadata';
+import {
+  PVF_DIRECTORY_MANIFEST_VERSION,
+  PVF_MANIFEST_FILE,
+  PvfDirectoryManifest,
+  PvfDiskFileKind,
+  PvfDiskFileManifestEntry,
+  PvfArchivePhaseStats,
+  ParallelFileWriter,
+  createArchivePathResolver,
+  runConcurrent,
+} from './directoryArchive';
 
 export interface Progress { (n: number): void }
 
@@ -22,6 +34,11 @@ export interface PvfFileEntry {
   name: string;
   isFile: boolean;
   size?: number;
+}
+
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  const n = Number.isFinite(value) ? Math.floor(value as number) : fallback;
+  return Math.max(min, Math.min(max, n));
 }
 
 export class PvfModel {
@@ -388,6 +405,14 @@ export class PvfModel {
       let text = Buffer.from(content).toString('utf8');
       if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
       if (!this.strtable) this.strtable = new StringTable(encodingForKey('stringtable.bin'));
+      if (lower.endsWith('.lst')) {
+        const lstData = compileLstText(this, text, lower);
+        if (lstData) {
+          f.writeFileData(new Uint8Array(lstData.buffer, lstData.byteOffset, lstData.byteLength));
+          f.changed = true;
+          return true;
+        }
+      }
       const compiler = new ScriptCompiler(this);
       const data = compiler.compile(text);
       if (data) {
@@ -520,34 +545,197 @@ export class PvfModel {
     await fs.writeFile(dest, Buffer.from(data.subarray(0, f.dataLen)));
   }
 
-  /** 将整个封包解封到指定目录，保留目录结构，写入原始解密字节 */
+  /** 将整个封包解封到指定目录，保留目录结构。脚本/文本文件转为 UTF-8，二进制文件原样写入。 */
   async unpackTo(
     destDir: string,
     progress?: (current: number, total: number, key: string) => void,
+    options?: {
+      writeConcurrency?: number;
+      workerCount?: number;
+      mkdirConcurrency?: number;
+      writeBatchSize?: number;
+      onStats?: (stats: PvfArchivePhaseStats) => void;
+    },
   ) {
     const keys = this.getAllKeys();
     const total = keys.length;
-    for (let i = 0; i < total; i++) {
-      const key = keys[i];
+    const phaseStart = performance.now();
+    let afterPrepare = phaseStart;
+    let afterMkdir = phaseStart;
+    let afterWrite = phaseStart;
+    const targetRoot = path.resolve(destDir);
+    const resolveArchivePath = createArchivePathResolver(targetRoot, path);
+    await fs.mkdir(targetRoot, { recursive: true });
+
+    // 获取当前编码模式写入 manifest
+    let encodingMode = 'AUTO';
+    try {
+      const vscodeMod = await import('vscode');
+      const cfg = vscodeMod.workspace.getConfiguration();
+      encodingMode = (cfg.get<string>('pvf.encodingMode', 'AUTO') || 'AUTO').toUpperCase();
+    } catch { /* 使用默认 AUTO */ }
+    const defaultEncoding = encodingForKey('stringtable.bin');
+
+    // 1. 预计算所有目录和磁盘路径。实际转码/反编译在写入流水线中完成，避免先生成 36 万份输出再写盘。
+    const dirSet = new Set<string>();
+    const filePaths: { diskPath: string; key: string }[] = [];
+    const manifestFiles = new Array<PvfDiskFileManifestEntry>(total);
+
+    const classifyText = (key: string, f: PvfFile, slice: Uint8Array): { text: string; encoding: string } | null => {
+      if (slice.length === 0) return { text: '', encoding: encodingForKey(key) };
+      const enc = detectEncoding(key, slice);
+      if (!isTextEncoding(enc)) return null;
+      const text = iconv.decode(Buffer.from(slice), enc);
+      return isPrintableText(text) ? { text, encoding: enc } : null;
+    };
+
+    const prepareOutput = async (key: string): Promise<{ kind: PvfDiskFileKind; encoding?: string; data: Uint8Array | Buffer }> => {
       const f = this.fileList.get(key)!;
-      const data = await this.readAndDecrypt(f);
-      const raw = data.subarray(0, f.dataLen);
-      const diskPath = path.join(destDir, ...key.split('/'));
-      await fs.mkdir(path.dirname(diskPath), { recursive: true });
-      await fs.writeFile(diskPath, Buffer.from(raw));
-      if (progress) progress(i + 1, total, key);
+      const data = f.data ?? await this.readAndDecrypt(f);
+      const lower = key.toLowerCase();
+      let kind: PvfDiskFileKind = 'binary';
+      let encoding: string | undefined;
+      let text: string | undefined;
+      const slice = data.subarray(0, f.dataLen);
+
+      if (f.isScriptFile) {
+        kind = 'script';
+        text = lower.endsWith('.lst')
+          ? (decompileLst(this, f, lower) || this.decompileScript(f))
+          : this.decompileScript(f);
+      } else if (lower === 'stringtable.bin') {
+        kind = 'stringtable';
+        encoding = defaultEncoding;
+        text = utilRenderStringTableText(this.fileList, this.strtable);
+      } else if (lower.endsWith('.ani')) {
+        const aniText = decompileBinaryAni(f);
+        if (aniText !== null) {
+          kind = 'binaryAni';
+          text = aniText;
+        } else {
+          const textInfo = classifyText(key, f, slice);
+          if (textInfo) {
+            kind = 'text';
+            encoding = textInfo.encoding;
+            text = textInfo.text;
+          }
+        }
+      } else if (lower.endsWith('.nut')) {
+        kind = 'text';
+        encoding = 'cp949';
+        text = iconv.decode(Buffer.from(slice), 'cp949');
+      } else if (isTextByExtensionForExport(lower) || isTextByExtension(lower)) {
+        const textInfo = classifyText(key, f, slice);
+        if (textInfo) {
+          kind = 'text';
+          encoding = textInfo.encoding;
+          text = textInfo.text;
+        }
+      }
+
+      return { kind, encoding, data: text !== undefined ? Buffer.from(text, 'utf8') : slice };
+    };
+
+    for (const key of keys) {
+      const diskPath = resolveArchivePath(key);
+      dirSet.add(path.dirname(diskPath));
+      filePaths.push({ diskPath, key });
     }
-    // 写入 manifest 供 repack 使用
-    const manifest = {
+    afterPrepare = performance.now();
+
+    // 并发创建目录，但避免 36 万文件时一次性提交过多 Promise
+    const dirs = [...dirSet];
+    const mkdirConcurrency = clampInt(options?.mkdirConcurrency, 128, 1, 1024);
+    await runConcurrent(dirs, mkdirConcurrency, async (dir) => {
+      await fs.mkdir(dir, { recursive: true });
+    });
+    afterMkdir = performance.now();
+
+    // 2. 并发批量写入
+    const CONCURRENCY = clampInt(options?.writeConcurrency, 512, 1, 2048);
+    const workerCount = total >= 10000 ? clampInt(options?.workerCount, 12, 0, 32) : 0;
+    const writeBatchSize = clampInt(options?.writeBatchSize, workerCount > 0 ? 64 : 16, 1, 512);
+    const writeBatches: (typeof filePaths)[] = [];
+    for (let i = 0; i < filePaths.length; i += writeBatchSize) {
+      writeBatches.push(filePaths.slice(i, i + writeBatchSize));
+    }
+    const batchConcurrency = workerCount > 0
+      ? Math.max(workerCount, Math.ceil(CONCURRENCY / writeBatchSize))
+      : Math.max(1, Math.ceil(CONCURRENCY / writeBatchSize));
+    const writer = new ParallelFileWriter(workerCount);
+    let completed = 0;
+    let lastReportedPct = -1;
+
+    try {
+      await runConcurrent(writeBatches, batchConcurrency, async (batch, batchIndex) => {
+        const writes = [];
+        for (let i = 0; i < batch.length; i++) {
+          const file = batch[i];
+          const out = await prepareOutput(file.key);
+          const fileIndex = batchIndex * writeBatchSize + i;
+          manifestFiles[fileIndex] = out.encoding ? [file.key, out.kind, out.encoding] : [file.key, out.kind];
+          writes.push({ path: file.diskPath, data: out.data });
+        }
+        await writer.writeFiles(writes);
+        completed += batch.length;
+        const lastKey = batch[batch.length - 1]?.key ?? '';
+        // 每 1% 进度回调一次
+        const pct = total > 0 ? Math.floor((completed / total) * 100) : 100;
+        if (progress && pct !== lastReportedPct) {
+          lastReportedPct = pct;
+          progress(completed, total, lastKey);
+        }
+      });
+    } finally {
+      await writer.close();
+    }
+    afterWrite = performance.now();
+
+    if (progress) progress(total, total, '');
+
+    // 写入 manifest 供 repack 使用（记录编码模式）
+    const manifest: PvfDirectoryManifest = {
+      version: PVF_DIRECTORY_MANIFEST_VERSION,
       guid: this.guid.toString('hex'),
       guidLen: this.guidLen,
       fileVersion: this.fileVersion,
+      encodingMode,
+      defaultEncoding,
       fileCount: total,
+      files: manifestFiles,
     };
     await fs.writeFile(
-      path.join(destDir, '.pvfmanifest.json'),
-      Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'),
+      path.join(destDir, PVF_MANIFEST_FILE),
+      Buffer.from(JSON.stringify(manifest), 'utf8'),
     );
+    try {
+      const done = performance.now();
+      const stats: PvfArchivePhaseStats = {
+        files: total,
+        dirs: dirs.length,
+        totalMs: done - phaseStart,
+        phases: {
+          prepare: afterPrepare - phaseStart,
+          mkdir: afterMkdir - afterPrepare,
+          pipelineWrite: afterWrite - afterMkdir,
+          manifest: done - afterWrite,
+        },
+      };
+      options?.onStats?.(stats);
+      console.log('[pvf unpack] phases (ms):', {
+        prepare: stats.phases.prepare.toFixed(1),
+        mkdir: stats.phases.mkdir.toFixed(1),
+        pipelineWrite: stats.phases.pipelineWrite.toFixed(1),
+        manifest: stats.phases.manifest.toFixed(1),
+        total: stats.totalMs.toFixed(1),
+        files: stats.files,
+        dirs: stats.dirs,
+        writeConcurrency: CONCURRENCY,
+        writeBatchSize,
+        batchConcurrency,
+        workerCount,
+      });
+    } catch { /* ignore profiling output errors */ }
   }
 
   async replaceFile(key: string, srcPath: string) {

@@ -2,72 +2,313 @@ import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as iconv from 'iconv-lite';
+import { performance } from 'perf_hooks';
 import { Deps } from './types';
 import { PvfFile } from '../pvf/pvfFile';
 import { saveImpl } from '../pvf/modelIO';
 import { getFileNameHashCode } from '../pvf/util';
 import { PvfModel } from '../pvf/model';
+import { encodingForKeyWithMode, isTextByExtensionForExport, isPrintableText } from '../pvf/helpers';
+import { StringTable } from '../pvf/stringTable';
+import { ScriptCompiler } from '../pvf/scriptCompiler';
+import { compileBinaryAni } from '../pvf/aniCompiler';
+import { compileLstText } from '../pvf/lstDecompiler';
+import {
+  createManifestEntryMap,
+  normalizeArchiveKey,
+  PVF_MANIFEST_FILE,
+  PvfArchivePhaseStats,
+  PvfDirectoryManifest,
+  PvfDiskFileKind,
+  runConcurrent,
+  stripUtf8Bom,
+} from '../pvf/directoryArchive';
 
-/** 将磁盘目录重新封装为 .pvf 文件 */
+interface RepackFile {
+  key: string;
+  diskPath: string;
+  kind: PvfDiskFileKind;
+  encoding?: string;
+}
+
+/** 将磁盘目录重新封装为 .pvf 文件。脚本/文本文件从 UTF-8 转回原始格式，二进制文件原样写入。 */
 async function repackDirectory(
   srcDir: string,
   destPath: string,
   progress?: (current: number, total: number, key: string) => void,
+  options?: {
+    readConcurrency?: number;
+    onStats?: (stats: PvfArchivePhaseStats) => void;
+  },
 ) {
+  const phaseStart = performance.now();
+  let afterManifest = phaseStart;
+  let afterWalk = phaseStart;
+  let afterStringTable = phaseStart;
+  let afterConvert = phaseStart;
   // 1. 读取 manifest（如果存在）
   let guid = Buffer.alloc(0);
   let guidLen = 0;
   let fileVersion = 0;
+  let encodingMode = 'AUTO';
+  let defaultEncoding = 'big5';
+  let manifest: Partial<PvfDirectoryManifest> | undefined;
   try {
-    const manifestRaw = await fs.readFile(path.join(srcDir, '.pvfmanifest.json'), 'utf8');
-    const m = JSON.parse(manifestRaw);
-    if (m.guid) guid = Buffer.from(m.guid, 'hex');
-    guidLen = m.guidLen ?? guid.length;
-    fileVersion = m.fileVersion ?? 0;
+    const manifestRaw = await fs.readFile(path.join(srcDir, PVF_MANIFEST_FILE), 'utf8');
+    manifest = JSON.parse(manifestRaw);
+    if (manifest?.guid) guid = Buffer.from(manifest.guid, 'hex');
+    guidLen = manifest?.guidLen ?? guid.length;
+    fileVersion = manifest?.fileVersion ?? 0;
+    if (manifest?.encodingMode) encodingMode = manifest.encodingMode;
+    if (manifest?.defaultEncoding) defaultEncoding = manifest.defaultEncoding;
   } catch { /* 使用默认值 */ }
+  const manifestEntries = createManifestEntryMap(manifest);
+  afterManifest = performance.now();
 
   // 2. 递归收集所有文件（排除 .pvfmanifest.json）
-  const files: { key: string; diskPath: string }[] = [];
-  async function walk(dir: string) {
+  const files: RepackFile[] = [];
+  async function walk(dir: string): Promise<void> {
     const entries = await fs.readdir(dir, { withFileTypes: true });
+    const subdirs: string[] = [];
     for (const e of entries) {
       const full = path.join(dir, e.name);
-      const rel = path.relative(srcDir, full).replace(/\\/g, '/').toLowerCase();
-      if (e.name === '.pvfmanifest.json') continue;
+      const rel = normalizeArchiveKey(path.relative(srcDir, full));
+      if (!rel || e.name === PVF_MANIFEST_FILE) continue;
       if (e.isDirectory()) {
-        await walk(full);
+        subdirs.push(full);
       } else if (e.isFile()) {
-        files.push({ key: rel, diskPath: full });
+        const entry = manifestEntries.get(rel);
+        files.push({
+          key: rel,
+          diskPath: full,
+          kind: entry?.[1] ?? inferDiskFileKind(rel),
+          encoding: entry?.[2],
+        });
       }
     }
+    await runConcurrent(subdirs, 16, async (subdir) => walk(subdir));
   }
   await walk(srcDir);
+  files.sort((a, b) => a.key < b.key ? -1 : (a.key > b.key ? 1 : 0));
+  afterWalk = performance.now();
 
-  // 3. 创建临时 PvfModel 并填充
+  // 3. 解析 stringtable.bin（若存在），供脚本编译和 stringtable 重建
+  let strTable: StringTable | undefined;
+  const stPath = files.find(f => f.key === 'stringtable.bin');
+  if (stPath) {
+    try {
+      const stText = await fs.readFile(stPath.diskPath, 'utf8');
+      strTable = new StringTable(encodingForKeyWithMode('stringtable.bin', encodingMode, defaultEncoding));
+      strTable.parseFromText(stripUtf8Bom(stText));
+    } catch { /* 解析失败则跳过 */ }
+  }
+  if (!strTable && files.some(f => f.kind === 'script')) {
+    strTable = new StringTable(encodingForKeyWithMode('stringtable.bin', encodingMode, defaultEncoding));
+  }
+  afterStringTable = performance.now();
+
+  // 4. 创建临时 PvfModel 并填充
   const tempModel = new PvfModel();
   (tempModel as any).guid = guid;
   (tempModel as any).guidLen = guidLen;
   (tempModel as any).fileVersion = fileVersion;
-  (tempModel as any).pvfPath = ''; // 无原始路径
+  (tempModel as any).pvfPath = '';
+  if (strTable) (tempModel as any).strtable = strTable;
 
-  for (let i = 0; i < files.length; i++) {
-    const { key, diskPath } = files[i];
+  const compiler = strTable ? new ScriptCompiler(tempModel as any) : null;
+  let lastReportedPct = -1;
+  let completed = 0;
+
+  const readConcurrency = clampInt(options?.readConcurrency, 192, 1, 1024);
+  await runConcurrent(files, readConcurrency, async ({ key, diskPath, kind, encoding }) => {
     const raw = new Uint8Array(await fs.readFile(diskPath));
+    const lower = key.toLowerCase();
+
+    let finalBytes: Uint8Array;
+
+    if (lower === 'stringtable.bin' || kind === 'stringtable') {
+      if (strTable) {
+        const bin = strTable.createBinary();
+        finalBytes = new Uint8Array(bin.buffer, bin.byteOffset, bin.byteLength);
+      } else {
+        finalBytes = raw;
+      }
+    } else if (kind === 'binary') {
+      finalBytes = raw;
+    } else if (kind === 'binaryAni') {
+      const text = stripUtf8Bom(Buffer.from(raw).toString('utf8'));
+      const compiledAni = compileBinaryAni(text, key);
+      if (compiledAni && compiledAni.length > 0) {
+        finalBytes = compiledAni;
+      } else if (!manifestEntries.has(lower) && text.startsWith('#PVF_File') && compiler) {
+        const compiled = compiler.compile(text);
+        finalBytes = compiled && compiled.length >= 2 && compiled[0] === 0xB0 && compiled[1] === 0xD0
+          ? new Uint8Array(compiled.buffer, compiled.byteOffset, compiled.byteLength)
+          : raw;
+      } else {
+        finalBytes = raw;
+      }
+    } else if (kind === 'script') {
+      const text = stripUtf8Bom(Buffer.from(raw).toString('utf8'));
+      if (!manifestEntries.has(lower) && !text.trimStart().startsWith('#PVF_File')) {
+        finalBytes = raw;
+      } else {
+        const compiled = lower.endsWith('.lst')
+          ? compileLstText(tempModel as any, text, lower)
+          : compiler?.compile(text);
+        if (compiled && compiled.length >= 2 && compiled[0] === 0xB0 && compiled[1] === 0xD0) {
+          finalBytes = new Uint8Array(compiled.buffer, compiled.byteOffset, compiled.byteLength);
+        } else if (lower.endsWith('.ani')) {
+          const compiledAni = compileBinaryAni(text, key);
+          finalBytes = compiledAni && compiledAni.length > 0 ? compiledAni : Buffer.from(text, 'utf8');
+        } else {
+          const targetEnc = encoding || encodingForKeyWithMode(key, encodingMode, defaultEncoding);
+          const encoded = iconv.encode(text, targetEnc);
+          finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+        }
+      }
+    } else if (kind === 'text') {
+      const text = stripUtf8Bom(Buffer.from(raw).toString('utf8'));
+      const targetEnc = encoding || encodingForKeyWithMode(key, encodingMode, defaultEncoding);
+      const encoded = iconv.encode(text, targetEnc);
+      finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+    } else {
+      // 尝试按 UTF-8 文本解读
+      let text: string | null = null;
+      try {
+        const t = stripUtf8Bom(Buffer.from(raw).toString('utf8'));
+        // 仅当内容为可打印文本时才视为 UTF-8 文本
+        if (isPrintableText(t.slice(0, 4096))) text = t;
+      } catch { /* 非 UTF-8，作为二进制 */ }
+
+      if (text !== null) {
+        if (lower.endsWith('.ani')) {
+          const compiledAni = compileBinaryAni(text, key);
+          if (compiledAni && compiledAni.length > 0) {
+            finalBytes = compiledAni;
+          } else if (text.startsWith('#PVF_File') && compiler) {
+            const compiled = compiler.compile(text);
+            finalBytes = compiled && compiled.length >= 2 && compiled[0] === 0xB0 && compiled[1] === 0xD0
+              ? new Uint8Array(compiled.buffer, compiled.byteOffset, compiled.byteLength)
+              : Buffer.from(text, 'utf8');
+          } else {
+            const targetEnc = encodingForKeyWithMode(key, encodingMode, defaultEncoding);
+            const encoded = iconv.encode(text, targetEnc);
+            finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+          }
+        } else if (text.startsWith('#PVF_File') && compiler) {
+          // 脚本文件（反编译文本）→ 编译回二进制
+          const compiled = lower.endsWith('.lst')
+            ? compileLstText(tempModel as any, text, lower)
+            : compiler.compile(text);
+          if (compiled && compiled.length >= 2 && compiled[0] === 0xB0 && compiled[1] === 0xD0) {
+            finalBytes = new Uint8Array(compiled.buffer, compiled.byteOffset, compiled.byteLength);
+          } else {
+            // 编译失败则按文本编码处理
+            const targetEnc = encodingForKeyWithMode(key, encodingMode, defaultEncoding);
+            const encoded = iconv.encode(text, targetEnc);
+            finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+          }
+        } else if (lower.endsWith('.nut')) {
+          const encoded = iconv.encode(text, 'cp949');
+          finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+        } else if (isTextByExtensionForExport(lower)) {
+          const targetEnc = encodingForKeyWithMode(key, encodingMode, defaultEncoding);
+          const encoded = iconv.encode(text, targetEnc);
+          finalBytes = new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+        } else {
+          finalBytes = raw; // 启发式文本但未知类型 → 原样保留
+        }
+      } else {
+        finalBytes = raw;
+      }
+    }
+
     const nameBytes = iconv.encode(key, 'cp949');
     const fileNameChecksum = getFileNameHashCode(nameBytes);
-    const pf = new PvfFile(fileNameChecksum, nameBytes, raw.length, 0, 0);
-    pf.writeFileData(raw); // 自动计算 checksum 并设置 blockLength
-    // PvfFile 初始化后 checksum 和 dataLen 已正确；存到 fileList 中
+    const pf = new PvfFile(fileNameChecksum, nameBytes, finalBytes.length, 0, 0);
+    pf.writeFileData(finalBytes);
     (tempModel as any).fileList.set(key, pf);
-    if (progress) progress(i + 1, files.length, key);
-  }
 
-  // 4. 调用 saveImpl 写出 .pvf
+    // 每 1% 进度回调一次
+    completed++;
+    const pct = files.length > 0 ? Math.floor((completed / files.length) * 100) : 100;
+    if (progress && pct !== lastReportedPct) {
+      lastReportedPct = pct;
+      progress(completed, files.length, key);
+    }
+  });
+  afterConvert = performance.now();
+
+  // 5. 调用 saveImpl 写出 .pvf
   await saveImpl.call(tempModel, destPath, (n: number) => {
     if (progress) {
       progress(Math.floor((n / 100) * files.length), files.length, '写入中...');
     }
   });
+  try {
+    const done = performance.now();
+    const stats: PvfArchivePhaseStats = {
+      files: files.length,
+      totalMs: done - phaseStart,
+      phases: {
+        manifest: afterManifest - phaseStart,
+        walk: afterWalk - afterManifest,
+        stringtable: afterStringTable - afterWalk,
+        convert: afterConvert - afterStringTable,
+        save: done - afterConvert,
+      },
+    };
+    options?.onStats?.(stats);
+    console.log('[pvf repack] phases (ms):', {
+      manifest: stats.phases.manifest.toFixed(1),
+      walk: stats.phases.walk.toFixed(1),
+      stringtable: stats.phases.stringtable.toFixed(1),
+      convert: stats.phases.convert.toFixed(1),
+      save: stats.phases.save.toFixed(1),
+      total: stats.totalMs.toFixed(1),
+      files: stats.files,
+      readConcurrency,
+    });
+  } catch { /* ignore profiling output errors */ }
+}
+
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  const n = Number.isFinite(value) ? Math.floor(value as number) : fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function inferDiskFileKind(key: string): PvfDiskFileKind {
+  const lower = key.toLowerCase();
+  if (lower === 'stringtable.bin') return 'stringtable';
+  if (lower.endsWith('.nut')) return 'text';
+  if (lower.endsWith('.ani')) return 'binaryAni';
+  if (isPvfScriptExtension(lower)) return 'script';
+  if (isTextByExtensionForExport(lower)) return 'text';
+  return 'binary';
+}
+
+function isPvfScriptExtension(lowerKey: string): boolean {
+  return lowerKey.endsWith('.act')
+    || lowerKey.endsWith('.skl')
+    || lowerKey.endsWith('.lst')
+    || lowerKey.endsWith('.str')
+    || lowerKey.endsWith('.equ')
+    || lowerKey.endsWith('.ai')
+    || lowerKey.endsWith('.aic')
+    || lowerKey.endsWith('.key')
+    || lowerKey.endsWith('.ptl');
+}
+
+function formatArchiveStats(label: string, stats: PvfArchivePhaseStats, extra?: Record<string, number>): string {
+  const phases = Object.entries(stats.phases)
+    .map(([name, ms]) => `${name}=${ms.toFixed(0)}ms`)
+    .join(', ');
+  const extras = extra
+    ? ' | ' + Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(', ')
+    : '';
+  const rate = stats.files > 0 ? Math.round(stats.files / Math.max(0.001, stats.totalMs / 1000)) : 0;
+  return `[PVF] ${label}: total=${stats.totalMs.toFixed(0)}ms, rate=${rate}/s, files=${stats.files}${stats.dirs !== undefined ? `, dirs=${stats.dirs}` : ''} | ${phases}${extras}`;
 }
 
 export function registerPvfFileOps(context: vscode.ExtensionContext, deps: Deps) {
@@ -132,14 +373,25 @@ export function registerPvfFileOps(context: vscode.ExtensionContext, deps: Deps)
       if (!dirs || dirs.length === 0) return;
       const destDir = dirs[0].fsPath;
       const total = model.getAllKeys().length;
+      const t0 = Date.now();
+      const cfg = vscode.workspace.getConfiguration();
+      const writeConcurrency = cfg.get<number>('pvf.unpack.writeConcurrency', 512);
+      const workerCount = cfg.get<number>('pvf.unpack.workerCount', 12);
+      const writeBatchSize = cfg.get<number>('pvf.unpack.writeBatchSize', 64);
+      const mkdirConcurrency = cfg.get<number>('pvf.unpack.mkdirConcurrency', 128);
+      let phaseStats: PvfArchivePhaseStats | undefined;
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在解封 PVF…' }, async (p) => {
         let lastReport = 0;
         await model.unpackTo(destDir, (current, _total, key) => {
           const pct = Math.floor((current / _total) * 100);
           if (pct !== lastReport) { const inc = pct - lastReport; lastReport = pct; p.report({ increment: inc, message: `(${current}/${_total}) ${key.split('/').pop()}` }); }
-        });
+        }, { writeConcurrency, workerCount, writeBatchSize, mkdirConcurrency, onStats: stats => { phaseStats = stats; } });
       });
-      vscode.window.showInformationMessage(`解封完成：${total} 个文件 → ${destDir}`);
+      const seconds = Math.max(0.001, (Date.now() - t0) / 1000);
+      const rate = Math.round(total / seconds);
+      output.appendLine(`[PVF] unpack done: ${total} files in ${seconds.toFixed(1)}s (${rate}/s) -> ${destDir}`);
+      if (phaseStats) output.appendLine(formatArchiveStats('unpack phases', phaseStats, { writeConcurrency, workerCount, writeBatchSize, mkdirConcurrency }));
+      vscode.window.showInformationMessage(`解封完成：${total} 个文件，${rate} 文件/秒 → ${destDir}`);
     }),
     vscode.commands.registerCommand('pvf.repackPack', async () => {
       const dirs = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: '选择要封装的目录' });
@@ -147,14 +399,24 @@ export function registerPvfFileOps(context: vscode.ExtensionContext, deps: Deps)
       const srcDir = dirs[0].fsPath;
       const dest = await vscode.window.showSaveDialog({ filters: { 'PVF': ['pvf'] }, defaultUri: vscode.Uri.file(srcDir + '.pvf') });
       if (!dest) return;
+      const t0 = Date.now();
+      let finalTotal = 0;
+      const cfg = vscode.workspace.getConfiguration();
+      const readConcurrency = cfg.get<number>('pvf.repack.readConcurrency', 192);
+      let phaseStats: PvfArchivePhaseStats | undefined;
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在封装 PVF…' }, async (p) => {
         let lastReport = 0;
         await repackDirectory(srcDir, dest.fsPath, (current, total, _key) => {
+          finalTotal = total;
           const pct = Math.floor((current / total) * 100);
           if (pct !== lastReport) { const inc = pct - lastReport; lastReport = pct; p.report({ increment: inc, message: `${current}/${total}` }); }
-        });
+        }, { readConcurrency, onStats: stats => { phaseStats = stats; } });
       });
-      vscode.window.showInformationMessage(`封装完成 → ${dest.fsPath}`);
+      const seconds = Math.max(0.001, (Date.now() - t0) / 1000);
+      const rate = finalTotal > 0 ? Math.round(finalTotal / seconds) : 0;
+      output.appendLine(`[PVF] repack done: ${finalTotal} files in ${seconds.toFixed(1)}s (${rate}/s) -> ${dest.fsPath}`);
+      if (phaseStats) output.appendLine(formatArchiveStats('repack phases', phaseStats, { readConcurrency }));
+      vscode.window.showInformationMessage(`封装完成：${finalTotal} 个文件，${rate} 文件/秒 → ${dest.fsPath}`);
     }),
   );
 }

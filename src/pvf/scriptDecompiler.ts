@@ -10,17 +10,26 @@ function formatFloat(n: number): string {
 
 export function decompileScript(model: any, f: PvfFile): string {
   const data = f.data!;
-  const items: { t: number, v: number }[] = [];
+  const types: number[] = [];
+  const values: number[] = [];
   for (let i = 2; i < f.dataLen - 4; i += 5) {
     const t = data[i];
     const v = (data[i + 1] | (data[i + 2] << 8) | (data[i + 3] << 16) | (data[i + 4] << 24)) >>> 0;
-    if (t >= 2 && t <= 10) items.push({ t, v });
+    if (t >= 2 && t <= 10) {
+      types.push(t);
+      values.push(v);
+    }
   }
   const sb: string[] = [];
   sb.push('#PVF_File');
 
   const getStr = (idx: number) => model.getStringFromTable(idx) ?? `#${idx}`;
   const getStrLink = (id: number, nameIdx: number) => model.getStringView()?.get(id, getStr(nameIdx)) ?? '';
+  let showSimplified = true;
+  try {
+    const cfg = require('vscode').workspace.getConfiguration();
+    showSimplified = cfg.get('pvf.script.convertStringLink', true);
+  } catch { /* ignore */ }
 
   // 仅把 type==5 视为章节，避免把普通字符串值(如 "[passive]")误判成章节。
   const isSection = (t: number, v: number): boolean => {
@@ -28,13 +37,17 @@ export function decompileScript(model: any, f: PvfFile): string {
     return false;
   };
 
+  const scratchView = new DataView(new ArrayBuffer(4));
+  const toFloat32 = (v: number): number => {
+    scratchView.setUint32(0, v, true);
+    return scratchView.getFloat32(0, true);
+  };
+
   const formatNumberToken = (t: number, v: number): string => {
     if (t === 4) {
-      const f32 = new DataView(new Uint32Array([v]).buffer).getFloat32(0, true);
-      return formatFloat(f32);
+      return formatFloat(toFloat32(v));
     }
-    const s32 = new DataView(new Uint32Array([v]).buffer).getInt32(0, true);
-    return String(s32);
+    return String(v | 0);
   };
 
   let i = 0;
@@ -47,7 +60,7 @@ export function decompileScript(model: any, f: PvfFile): string {
   const sectionStack: string[] = []; // stack of container section names (lowercase)
 
   const floatForSection = (sec: string | null, n: number): string => {
-    const s = new DataView(new Uint32Array([n]).buffer).getFloat32(0, true);
+    const s = toFloat32(n);
     if (sec === '[level property]') {
       // 保留整数浮点的 .0
       if (Number.isInteger(s)) return s.toFixed(1);
@@ -59,14 +72,9 @@ export function decompileScript(model: any, f: PvfFile): string {
     sb.push('\t'.repeat(indentLevel + extraIndent) + content);
   };
 
-  while (i < items.length) {
-    const { t, v } = items[i];
-    // 读取配置（每次调用以便动态生效）: true=只显示 `文本`；false=显示 <id::name`文本`>
-    let showSimplified = true;
-    try {
-      const cfg = require('vscode').workspace.getConfiguration();
-      showSimplified = cfg.get('pvf.script.convertStringLink', true);
-    } catch { /* ignore */ }
+  while (i < types.length) {
+    const t = types[i];
+    const v = values[i];
     if (isSection(t, v)) {
       const name = getStr(v);
       const nameLower = name.toLowerCase();
@@ -113,8 +121,8 @@ export function decompileScript(model: any, f: PvfFile): string {
       if (t === 7) {
         emitLine('`' + getStr(v) + '`', 1); i++; continue;
       }
-      if (t === 9 && i + 1 < items.length && items[i + 1].t === 10) {
-        const nameIdx = items[i + 1].v;
+      if (t === 9 && i + 1 < types.length && types[i + 1] === 10) {
+        const nameIdx = values[i + 1];
         const nameRaw = getStr(nameIdx);
         const val = getStrLink(v, nameIdx) || nameRaw;
         if (showSimplified) {
@@ -126,18 +134,18 @@ export function decompileScript(model: any, f: PvfFile): string {
       }
       // 其它数字：聚合一行
       const nums: string[] = [];
-      while (i < items.length && !isSection(items[i].t, items[i].v)) {
-        const it = items[i];
-        if (it.t === 6 || it.t === 7 || it.t === 8 || it.t === 9) break;
-        nums.push(formatNumberToken(it.t, it.v)); i++;
+      while (i < types.length && !isSection(types[i], values[i])) {
+        const itType = types[i];
+        if (itType === 6 || itType === 7 || itType === 8 || itType === 9) break;
+        nums.push(formatNumberToken(itType, values[i])); i++;
       }
       if (nums.length) emitLine(nums.join('\t'), 1);
       continue;
     }
 
     // string link 9+10
-    if (t === 9 && i + 1 < items.length && items[i + 1].t === 10) {
-      const nameIdx = items[i + 1].v;
+    if (t === 9 && i + 1 < types.length && types[i + 1] === 10) {
+      const nameIdx = values[i + 1];
       const nameRaw = getStr(nameIdx);
       const val = getStrLink(v, nameIdx) || nameRaw;
       if (showSimplified) emitLine('`' + val + '`', 1);
@@ -148,10 +156,10 @@ export function decompileScript(model: any, f: PvfFile): string {
     if (t === 7) {
       const strVal = getStr(v);
       let j = i + 1; const nums: string[] = [];
-      while (j < items.length) {
-        const jt = items[j].t;
-        if (isSection(jt, items[j].v) || jt === 7 || jt === 9) break;
-        if (jt === 4) nums.push(floatForSection(currentSection, items[j].v)); else nums.push(formatNumberToken(jt, items[j].v));
+      while (j < types.length) {
+        const jt = types[j];
+        if (isSection(jt, values[j]) || jt === 7 || jt === 9) break;
+        if (jt === 4) nums.push(floatForSection(currentSection, values[j])); else nums.push(formatNumberToken(jt, values[j]));
         j++;
       }
       if (nums.length) emitLine('`' + strVal + '`\t' + nums.join('\t'), 1);
@@ -160,8 +168,8 @@ export function decompileScript(model: any, f: PvfFile): string {
     }
     // 纯数字行（聚合直到控制 token）
     const line: string[] = [];
-    while (i < items.length) {
-      const kt = items[i].t; const kv = items[i].v;
+    while (i < types.length) {
+      const kt = types[i]; const kv = values[i];
       if (isSection(kt, kv) || kt === 7 || kt === 9) break;
       if (kt === 4) line.push(floatForSection(currentSection, kv)); else line.push(formatNumberToken(kt, kv));
       i++;
