@@ -536,6 +536,7 @@ const state = vscode.getState();
 if (state && typeof state.text === 'string') editor.value = state.text;
 updatePreview();
 editor.focus();
+requestAnimationFrame(() => vscode.postMessage({ type: 'ready' }));
 </script>
 </body>
 </html>`;
@@ -553,39 +554,69 @@ export function registerScriptTagCommentEditor(context: vscode.ExtensionContext)
             vscode.window.showWarningMessage(`不支持的标签类型: ${short}`);
             return;
         }
+        const name = resolved.name;
 
-        const tag = await readTagForEditor(context, short, resolved.name);
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: '正在加载 Markdown 注释...',
+            cancellable: false
+        }, async progress => {
+            progress.report({ message: '读取标签注释' });
+            const tag = await readTagForEditor(context, short, name);
 
-        const panel = vscode.window.createWebviewPanel(
-            'pvfScriptTagComment',
-            `注释: [${tag.name}]`,
-            vscode.ViewColumn.Beside,
-            { enableScripts: true, retainContextWhenHidden: true }
-        );
+            const panel = vscode.window.createWebviewPanel(
+                'pvfScriptTagComment',
+                `注释: [${tag.name}]`,
+                vscode.ViewColumn.Beside,
+                { enableScripts: true, retainContextWhenHidden: true }
+            );
 
-        panel.webview.html = editorHtml(panel, {
-            short,
-            name: tag.name,
-            description: tag.description || '',
-            authors: tag.authors || '',
-            currentAuthor: configuredAuthor()
-        });
+            let ready = false;
+            let resolveReady: (() => void) | undefined;
+            const readyPromise = new Promise<void>(resolve => { resolveReady = resolve; });
+            const markReady = () => {
+                if (ready) return;
+                ready = true;
+                resolveReady?.();
+            };
+            const readyTimeout = setTimeout(markReady, 4000);
+            panel.onDidDispose(() => {
+                clearTimeout(readyTimeout);
+                markReady();
+            });
 
-        panel.webview.onDidReceiveMessage(async msg => {
-            if (!msg || typeof msg !== 'object') return;
-            if (msg.type !== 'save' || typeof msg.description !== 'string') return;
-            try {
-                const result = await saveTagDescription(context, short, tag.name, msg.description, tag);
-                tag.description = msg.description.replace(/\r\n?/g, '\n').trimEnd();
-                tag.authors = result.authors;
-                panel.webview.postMessage({ type: 'saved', files: result.files, authors: result.authors });
-                const action = result.created ? '已创建并保存' : '已保存';
-                vscode.window.showInformationMessage(`${action} [${tag.name}] 注释`);
-            } catch (err: any) {
-                const message = String(err && err.message || err);
-                panel.webview.postMessage({ type: 'error', message });
-                vscode.window.showErrorMessage(message);
-            }
+            panel.webview.onDidReceiveMessage(async msg => {
+                if (!msg || typeof msg !== 'object') return;
+                if (msg.type === 'ready') {
+                    clearTimeout(readyTimeout);
+                    markReady();
+                    return;
+                }
+                if (msg.type !== 'save' || typeof msg.description !== 'string') return;
+                try {
+                    const result = await saveTagDescription(context, short, tag.name, msg.description, tag);
+                    tag.description = msg.description.replace(/\r\n?/g, '\n').trimEnd();
+                    tag.authors = result.authors;
+                    panel.webview.postMessage({ type: 'saved', files: result.files, authors: result.authors });
+                    const action = result.created ? '已创建并保存' : '已保存';
+                    vscode.window.showInformationMessage(`${action} [${tag.name}] 注释`);
+                } catch (err: any) {
+                    const message = String(err && err.message || err);
+                    panel.webview.postMessage({ type: 'error', message });
+                    vscode.window.showErrorMessage(message);
+                }
+            });
+
+            progress.report({ message: '渲染 Markdown 预览' });
+            panel.webview.html = editorHtml(panel, {
+                short,
+                name: tag.name,
+                description: tag.description || '',
+                authors: tag.authors || '',
+                currentAuthor: configuredAuthor()
+            });
+
+            await readyPromise;
         });
     }));
 }
