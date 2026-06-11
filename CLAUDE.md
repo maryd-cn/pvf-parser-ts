@@ -49,6 +49,8 @@ src/
 │   ├── treeComments.ts   # Built-in/user path comments keyed by PVF path/version
 │   ├── unpackEnv.ts      # Reads .env UNPACK_DIR/PVF_UNPACK_DIR and NPK_DIR
 │   ├── unpackMetadata.ts # Lazy disk metadata/code/icon resolver for unpack tree
+│   ├── unpackPreview.ts  # DNF-like typed preview parser/model for unpack files
+│   ├── unpackPreviewPanel.ts # Rich preview WebviewPanel shown beside text editors
 │   ├── unpackExplorerWebview.ts # WebviewViewProvider for disk unpack dir resources
 │   ├── unpackExplorerProvider.ts # Legacy TreeDataProvider implementation; not the registered view
 │   ├── diskTreeCommentDecorations.ts # Native Explorer hover tooltip for unpack paths
@@ -134,6 +136,31 @@ In the Webview row renderer:
 Native VS Code Explorer cannot append arbitrary full text after file names. Its `FileDecoration.badge` is only a very short marker and labels longer than about two characters may be clipped or omitted. Therefore `diskTreeCommentDecorations.ts` must not be used for full inline comments; it only provides native Explorer hover tooltips and the context-menu command path for disk files. Full visible comments belong in the custom `pvfUnpackExplorerView`.
 
 When verifying hover/tooltip/floating-window behavior, test primarily against real disk files opened from the configured `UNPACK_DIR`. This covers disk path normalization, `.env` root resolution, `.lst` lookup from unpacked folders, native Explorer hover tooltip behavior, and the right-click `pvf.editTreeComment` command. Testing only `pvf:` virtual files does not validate the disk-unpack workflow.
+
+#### DNF-like Unpack Previews
+DNF-like previews for unpacked files are implemented only for the disk-unpack workflow, not editor token hover and not the packed `pvf:` resource tree. The main pieces are:
+
+- `UnpackPreviewService` (`src/pvf/unpackPreview.ts`): host-side parser and typed preview model. It reads the unpacked file, parses PVF tags, resolves names/codes/icons through `UnpackMetadataService`, resolves item/skill references from `.lst` files, and returns one of `equipment`, `equipmentSet`, `stackable`, `shop`, `quest`, `skill`, `skillTree`, or `error`.
+- `UnpackHoverPreviewPanel` (`src/pvf/unpackPreviewPanel.ts`): rich DNF-like WebviewPanel shown in `ViewColumn.Beside`. Keep this as a single preview frame; the user explicitly rejected the two-frame split layout.
+- `UnpackExplorerWebviewProvider` (`src/pvf/unpackExplorerWebview.ts`): wires custom unpack-view messages, native Explorer active-editor detection, open-with-preview behavior, save refresh, and conversion to plain native tooltip text.
+- `src/webview/unpackExplorerClient.js`: plain browser client for row hover timing, native tooltip text, inline fallback, context menu `显示预览`, and opening files with preview.
+
+Supported preview triggers:
+
+- Custom `pvfUnpackExplorerView` hover requests send `{ type: 'preview', id, requestId }`.
+- Custom `pvfUnpackExplorerView` open/right-click preview sends `showPreview` or opens the file and then shows the panel.
+- Native VS Code Explorer opening a real file under configured unpack roots opens/refreshes the side preview when `pvf.unpackExplorer.preview.openWithTextEditor` is true.
+- Saving the currently previewed disk file invalidates that preview cache, refreshes the row metadata, and re-renders the side preview.
+
+Preview location is controlled by `pvf.unpackExplorer.hoverPreview.location`:
+
+- `nativeTooltip` is the default. It sets the row `title` to a plain-text summary so Chromium/VS Code can draw a tooltip outside the sidebar bounds. Native tooltip cannot render colors or images.
+- `editorPanel` opens/reuses the rich side panel.
+- `inline` is the old in-Webview floating tooltip and can be clipped by the sidebar Webview boundary.
+
+Keep native hover fast. `UnpackPreviewService.resolvePreview(input)` defaults to not waiting for NPK icon decoding. Rich panel rendering must call `resolvePreview(input, { resolveIcon: true })`; this prevents save-triggered refreshes from rendering a freshly rebuilt metadata object before `iconDataUri` is available. The preview cache stores whether icons have settled, so a fast native-tooltip cache is not reused as a final rich-panel preview.
+
+Do not make unsupported `.co`/`.etc` files display "no preview" on hover in the custom view; preserve normal path tooltips unless the file is a real preview candidate. Skill-tree detection is path-based for `clientonly/skilltree/*_sp.co`, `*_tp.co`, `clientonly/skillshoptreespindex.co`, `clientonly/skillshoptreetpindex.co`, `etc/pvpskilltree/*.etc`, and content-based for files containing `[character job]`, `[skill info]`, and `[icon pos]`.
 
 ### Built-In Bookmarks
 Built-in bookmarks are stored in `src/pvf/resources/bookmarks.json` as a cleaned tree:

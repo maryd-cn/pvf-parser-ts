@@ -1049,6 +1049,38 @@
           "default": "<{code}>",
           "description": "解包目录物品代码显示格式。使用 {code} 作为数字占位符。"
         },
+        "pvf.unpackExplorer.hoverPreview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "解包目录是否在悬停装备、套装、道具、商店、任务、技能和技能树文件时显示 DNF-like 预览浮窗。"
+        },
+        "pvf.unpackExplorer.hoverPreview.delayMs": {
+          "type": "number",
+          "default": 350,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "解包目录悬停预览打开延迟，单位毫秒。"
+        },
+        "pvf.unpackExplorer.hoverPreview.location": {
+          "type": "string",
+          "default": "nativeTooltip",
+          "enum": [
+            "nativeTooltip",
+            "editorPanel",
+            "inline"
+          ],
+          "enumDescriptions": [
+            "使用 VS Code/Chromium 原生 tooltip，可越过侧边栏边界，但只支持纯文本。",
+            "在编辑器区域打开/复用一个预览面板，可显示在侧边栏外侧。",
+            "在解包目录 webview 内部显示悬停浮窗，会被侧边栏边界裁剪。"
+          ],
+          "description": "解包目录悬停预览显示位置。"
+        },
+        "pvf.unpackExplorer.preview.openWithTextEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开解包目录或原生资源管理器中的可预览解包文件时，是否同时打开/刷新右侧 DNF-like 预览。"
+        },
         "pvf.showScriptDisplayName": {
           "type": "boolean",
           "default": true,

@@ -28,6 +28,7 @@
 - **多编码支持** — 支持韩文（cp949）、繁体中文（big5）、简体中文（gb18030）、日文（shift_jis）和 UTF8，并可自动检测。
 - **解封目录编辑优化** — 解封后的磁盘脚本文件会自动切换到对应 `pvf-*` 语言模式，使用真实制表符缩进，并通过 VS Code 原生空白字符渲染显示制表符箭头。
 - **解包目录资源视图** — 从 `.env` 的 `UNPACK_DIR` 读取磁盘解包目录，在 PVF 侧边栏的 **解包目录** Webview 中显示路径注释、脚本真实名称、物品代码和 NPK/任务图标，例如 `101000001.equ 古代遗骨的青铜剑[活动] <101000001>`。文件名保持默认颜色，解析出的名称按 `rarity` 或字符串颜色显示，代码使用数字颜色显示。
+- **DNF-like 解包预览** — 悬停或打开解包目录中的装备、套装、道具、商店、任务、技能和技能树文件时，可显示仿 DNF 游戏内层级的预览。默认悬停使用 VS Code 原生 tooltip 显示纯文本摘要；打开文件或右键显示预览会在编辑器旁打开深色富预览面板，支持品质色标题、蓝色效果文本、任务/物品图标和保存后刷新。
 - **可编辑书签视图** — PVF 侧边栏的 **书签** 视图内置常用资源路径，可新建/重命名/删除文件夹和书签、拖拽移动目录；可从 PVF 资源树或解包目录右键添加文件/目录到书签。
 
 ## 环境要求
@@ -48,6 +49,10 @@
 | `pvf.unpackExplorer.metadata.showItemName` | `true` | **解包目录** 是否显示脚本内解析出的真实名称 |
 | `pvf.unpackExplorer.metadata.showItemCode` | `true` | **解包目录** 是否显示 `.lst` 或文件名解析出的代码 |
 | `pvf.unpackExplorer.metadata.itemCodeFormat` | `"<{code}>"` | **解包目录** 代码显示格式，使用 `{code}` 作为数字占位符 |
+| `pvf.unpackExplorer.hoverPreview.enabled` | `true` | **解包目录** 是否启用装备、套装、道具、商店、任务、技能和技能树文件的悬停预览 |
+| `pvf.unpackExplorer.hoverPreview.delayMs` | `350` | **解包目录** 悬停预览请求延迟，单位毫秒 |
+| `pvf.unpackExplorer.hoverPreview.location` | `nativeTooltip` | 悬停预览位置：`nativeTooltip` 为原生纯文本 tooltip，`editorPanel` 为编辑器旁富预览面板，`inline` 为 Webview 内浮窗 |
+| `pvf.unpackExplorer.preview.openWithTextEditor` | `true` | 从 **解包目录** 或 VS Code 原生 Explorer 打开可预览解包文件时，是否同时打开/刷新右侧富预览面板 |
 | `pvf.encodingMode` | `AUTO` | 文本编码：`AUTO`（自动检测）、`KR`（cp949）、`TW`（big5）、`CN`（gb18030）、`JP`（shift_jis）、`UTF8` |
 | `pvf.showScriptDisplayName` | `true` | 在资源树中文件后显示脚本别名（来自 `.lst` 解析） |
 | `pvf.showScriptCode` | `true` | 在资源树中文件后显示物品代码（来自 `.lst` 解析） |
@@ -101,6 +106,23 @@ creature     (NPC卖的宠物)
 图标路径优先读取设置 `pvf.unpackExplorer.npkIcon.paths`，为空时读取 `.env` 的 `NPK_DIR` / `PVF_NPK_DIR`，再回退到旧设置 `pvf.npkRoot`。`[icon]` 会解析到对应 IMG 帧并以 PNG data URI 发给 Webview；普通装备图标按 `pvf.unpackExplorer.npkIcon.size` 显示为正方形，任务图标根据 `grade` 或任务类型查找 `Interface/Quest/quest_tag.img`，并按高度等比显示为矩形，避免被压成看不清的正方块。
 
 解包目录 Webview 的目录展开只做当前层级的 `readdir`、排序和渲染，不会在展开大目录时同步解析所有脚本或解码所有 NPK 图标；脚本元数据和图标会限流异步补齐，适合 `equipment/character`、`equipment/character/partset` 这类大目录。
+
+### 解包目录 DNF-like 预览
+
+**解包目录** 的预览支持七类模板：装备 `.equ`、套装 `.equ`、道具 `.stk`、商店 `.shp`、任务 `.qst`、技能 `.skl` 和技能树配置。技能树会匹配 `clientonly/skilltree/*_sp.co`、`clientonly/skilltree/*_tp.co`、`clientonly/skillshoptreespindex.co`、`clientonly/skillshoptreetpindex.co`、`etc/pvpskilltree/*.etc`，以及内容包含 `[character job]`、`[skill info]` 和 `[icon pos]` 的 `.co` / `.etc` 文件。
+
+默认设置 `pvf.unpackExplorer.hoverPreview.location = nativeTooltip` 会在鼠标悬停时更新行的原生 tooltip。原生 tooltip 可以越过侧边栏边界，但只能显示纯文本，因此它用于快速摘要：名称、代码、路径、字段、说明和条目列表。它不会渲染颜色或图片，也不会为了悬停而等待 NPK 图标解码。
+
+富预览使用编辑器旁的 Webview 面板显示，打开方式包括：
+
+- 在 **解包目录** 左键打开可预览文件。
+- 在 **解包目录** 右键选择 **显示预览**。
+- 在 VS Code 原生 Explorer 中打开位于已配置解包根目录下的可预览文件。
+- 将 `pvf.unpackExplorer.hoverPreview.location` 改为 `editorPanel` 后悬停触发。
+
+当 `pvf.unpackExplorer.preview.openWithTextEditor` 为 `true` 时，打开可预览文件会同时显示原始文本编辑器和右侧 DNF-like 富预览面板。富预览会按类型分别渲染，不把道具、商店、任务或技能强行套用装备/套装模板；技能树预览会显示类型、职业、节点列表和基于 `[icon pos]` 的简化 mini-map。
+
+保存当前预览文件后，插件会失效该文件的预览缓存并刷新右侧面板。面板刷新会等待当前文件图标解析完成或失败后再渲染，所以已配置 NPK 根目录时，保存后的装备、道具、任务和技能预览仍应保留图标；未配置 NPK 根目录时文本预览仍可用，只是图标区域为空。
 
 原生 VS Code Explorer 不能通过扩展 API 在文件名后追加完整说明文字，且 `FileDecoration.badge` 超过 2 个字符会被 VS Code 直接截断或不显示。因此插件不会在原生 Explorer 中显示注释 badge；原生 Explorer 只保留完整注释的 hover tooltip 和右键菜单 **编辑路径注释**。需要完整行内注释时，请使用 PVF 侧边栏的 **解包目录** 视图。
 
