@@ -1,0 +1,19 @@
+.git/**
+.vs/**
+.vscode/**
+temporary file/**
+
+.env
+*.vsix
+*.code-workspace
+
+tsconfig.json
+package-lock.json
+
+scripts/**
+
+src/**/*.ts
+src/**/*.tsx
+
+dist/**/*.map
+media/webview/*.map
