@@ -505,6 +505,9 @@ export class UnpackPreviewService {
     const magicStats = statFields(tags, EQUIPMENT_MAGIC_LABELS, true, titles);
     if (magicStats.length) sections.push({ title: '特殊属性', fields: magicStats, tone: 'blue' });
 
+    const materialCodes = parseLooseItemEntries(tagLines(tags, 'need material', 'material', 'condition item', 'a condition item', 'b condition item'));
+    if (materialCodes.length) sections.push({ title: '材料/条件', entries: await this.resolveEntries(materialCodes.slice(0, 24), input, ITEM_LSTS) });
+
     addTextSection(sections, '装备说明', explainLines(tags, 'basic explain', 'detail explain', 'explain'), 'blue');
     addTextSection(sections, '风味文本', explainLines(tags, 'flavor text'), 'flavor');
 
@@ -890,11 +893,12 @@ function parseTags(text: string): ParsedTags {
     const tag = trimmed.match(/^\[([^\]]+)\]\s*(.*)$/);
     if (tag) {
       const name = tag[1].trim().toLowerCase();
+      const isTopLevel = rawLine.length === rawLine.trimStart().length;
       if (name.startsWith('/')) {
         current = '';
         continue;
       }
-      if (current && (BLOCK_VALUE_TAGS.has(current) || !KNOWN_PREVIEW_TAGS.has(name))) {
+      if (current && shouldKeepTagLineInCurrent(current, name, isTopLevel)) {
         values.get(current)!.push(trimmed);
         continue;
       }
@@ -906,6 +910,14 @@ function parseTags(text: string): ParsedTags {
     if (current && trimmed && !trimmed.startsWith('//')) values.get(current)!.push(trimmed);
   }
   return { values };
+}
+
+function shouldKeepTagLineInCurrent(current: string, nextName: string, isTopLevel: boolean): boolean {
+  if (isTopLevel) return false;
+  if (BLOCK_VALUE_TAGS.has(current)) {
+    return true;
+  }
+  return !KNOWN_PREVIEW_TAGS.has(nextName);
 }
 
 function hasTag(tags: ParsedTags, name: string): boolean {

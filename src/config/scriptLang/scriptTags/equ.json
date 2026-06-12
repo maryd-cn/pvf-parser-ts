@@ -646,8 +646,8 @@
     {
       "name": "detail explain",
       "title": "详细说明",
-      "description": "详细说明\n\n装备中显示的蓝色文本说明，和 [basic explain] 关联的，此时在游戏中按 F4(默认键) 可切换简单/详细说明。\n\n* 通常在装备上使用。",
-      "authors": "Cai - 263007544"
+      "description": "- 装备中显示的蓝色文本说明，和 [basic explain] 关联的，此时在游戏中按 F4(默认键) 可切换简单/详细说明。\n- 通常在装备上使用。",
+      "authors": "Cai - 263007544|Lancarus"
     },
     {
       "name": "flavor text",
@@ -1406,8 +1406,8 @@
     {
       "name": "separate attack",
       "title": "独立攻击力",
-      "description": "独立攻击力",
-      "authors": "Xiti Fox"
+      "description": "",
+      "authors": "Xiti Fox|Lancarus"
     },
     {
       "name": "subtype",
@@ -1530,10 +1530,10 @@
     },
     {
       "name": "pvp",
-      "title": "内的属性",
+      "title": "决斗场属性",
       "closing": true,
-      "description": "PVP内的属性",
-      "authors": "lostluna1"
+      "description": "",
+      "authors": "lostluna1|Lancarus"
     },
     {
       "name": "not amplify",
