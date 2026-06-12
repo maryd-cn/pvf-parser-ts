@@ -48,8 +48,8 @@
 | `pvf.unpackExplorer.npkIcon.size` | `16` | **解包目录** 行内图标基准尺寸；任务标签按高度等比显示为矩形 |
 | `pvf.unpackExplorer.metadata.showComment` | `true` | **解包目录** 是否显示路径注释 |
 | `pvf.unpackExplorer.metadata.showItemName` | `true` | **解包目录** 是否显示脚本内解析出的真实名称 |
-| `pvf.unpackExplorer.metadata.showItemCode` | `true` | **解包目录** 是否显示 `.lst` 或文件名解析出的代码 |
-| `pvf.unpackExplorer.metadata.itemCodeFormat` | `"<{code}>"` | **解包目录** 代码显示格式，使用 `{code}` 作为数字占位符 |
+| `pvf.unpackExplorer.metadata.showItemCode` | `true` | **解包目录** 是否显示 `.lst` 或文件名解析出的物品、技能等资源代码 |
+| `pvf.unpackExplorer.metadata.itemCodeFormat` | `"<{code}>"` | **解包目录** 资源代码显示格式，使用 `{code}` 作为数字占位符 |
 | `pvf.unpackExplorer.hoverPreview.enabled` | `true` | **解包目录** 是否启用装备、套装、道具、商店、任务、技能和技能树文件的悬停预览 |
 | `pvf.unpackExplorer.hoverPreview.delayMs` | `350` | **解包目录** 悬停预览请求延迟，单位毫秒 |
 | `pvf.unpackExplorer.hoverPreview.location` | `nativeTooltip` | 悬停预览位置：`nativeTooltip` 为原生纯文本 tooltip，`editorPanel` 为编辑器旁富预览面板，`inline` 为 Webview 内浮窗 |

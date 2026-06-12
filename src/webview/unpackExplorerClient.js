@@ -89,6 +89,7 @@
   }
 
   function nameClass(row) {
+    if (row.skillKind) return `item-name skill-name skill-${row.skillKind}`;
     if (typeof row.rarity === 'number' && row.rarity >= 0 && row.rarity <= 7) return `item-name rarity-${row.rarity}`;
     return 'item-name string';
   }
@@ -103,6 +104,10 @@
     }
     if (cfg.showItemName !== false && row.itemName) {
       meta.appendChild(span(nameClass(row), row.itemName));
+      hasMeta = true;
+    }
+    if (cfg.showItemName !== false && row.skillClassText) {
+      meta.appendChild(span('skill-class', row.skillClassText));
       hasMeta = true;
     }
     if (cfg.showItemCode !== false && row.itemCodeText) {

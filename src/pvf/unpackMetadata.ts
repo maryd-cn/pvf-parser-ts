@@ -17,6 +17,9 @@ export interface UnpackResolvedMetadata {
   itemCode?: number;
   rarity?: number;
   grade?: string;
+  skillClass?: number;
+  skillClassText?: string;
+  skillKind?: 'active' | 'passive' | 'common' | 'guild';
   icon?: UnpackIconReference;
   iconPath?: string;
   iconDataUri?: string;
@@ -55,6 +58,13 @@ interface StrCacheEntry {
 interface ShopNpcMetadataIndex {
   byShopCode: Map<number, UnpackResolvedMetadata>;
   byDialogNpcId: Map<number, UnpackResolvedMetadata>;
+}
+
+interface SimpleParsedTags {
+  name?: string;
+  name2?: string;
+  tags: Record<string, string | string[]>;
+  icon?: UnpackIconReference;
 }
 
 interface DecodedIcon {
@@ -193,6 +203,18 @@ function tagValueToInt(value: string | string[] | undefined): number | undefined
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+function cleanPvfValue(value: string): string {
+  let text = value.trim();
+  const linkText = text.match(/`([^`]*)`/);
+  if (linkText) text = linkText[1];
+  text = text
+    .replace(/^`+|`+$/g, '')
+    .replace(/^"+|"+$/g, '')
+    .replace(/^'+|'+$/g, '')
+    .trim();
+  return text;
+}
+
 function allTagLines(value: string | string[] | undefined): string[] {
   if (Array.isArray(value)) return value.flatMap(item => item.split(/\r?\n/)).map(item => item.trim()).filter(Boolean);
   if (typeof value === 'string') return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
@@ -319,6 +341,122 @@ function codeFromFileName(key: string): number | undefined {
   return Number.isSafeInteger(code) ? code : undefined;
 }
 
+const SKILL_LST_CANDIDATES = [
+  'skill/swordmanskill.lst',
+  'skill/fighterskill.lst',
+  'skill/gunnerskill.lst',
+  'skill/mageskill.lst',
+  'skill/priestskill.lst',
+  'skill/atgunnerskill.lst',
+  'skill/thiefskill.lst',
+  'skill/atfighterskill.lst',
+  'skill/atmageskill.lst',
+  'skill/demonicswordman.lst',
+  'skill/creatormage.lst',
+  'skill/autoskill.lst',
+  'skill/skill.lst',
+  'skill/skilllist.lst',
+] as const;
+
+function skillClassText(_key: string, value: number | undefined): string | undefined {
+  if (typeof value !== 'number') return undefined;
+  return value === 4 ? '通用' : String(value);
+}
+
+function parseSimpleScriptTags(text: string): SimpleParsedTags {
+  const tags: Record<string, string | string[]> = {};
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  let current = '';
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    const tag = trimmed.match(/^\[([^\]]+)\]\s*(.*)$/);
+    if (tag) {
+      const name = tag[1].trim().toLowerCase();
+      if (name.startsWith('/')) {
+        if (current === name.slice(1).trim()) current = '';
+        continue;
+      }
+      current = name;
+      if (!tags[current]) tags[current] = [];
+      const inline = stripLineComment(tag[2] || '').trim();
+      if (inline) appendSimpleTagValue(tags, current, inline);
+      continue;
+    }
+    if (current) appendSimpleTagValue(tags, current, stripLineComment(trimmed).trim());
+  }
+
+  const name = tagValueToString(tags.name);
+  const name2 = tagValueToString(tags.name2);
+  const directIcon = iconFromTagValue(tags.icon);
+  return {
+    ...(name ? { name } : {}),
+    ...(name2 ? { name2 } : {}),
+    tags,
+    ...(directIcon ? { icon: directIcon } : {}),
+  };
+}
+
+function appendSimpleTagValue(tags: Record<string, string | string[]>, key: string, value: string): void {
+  if (!value) return;
+  const existing = tags[key];
+  if (Array.isArray(existing)) {
+    existing.push(value);
+  } else if (typeof existing === 'string') {
+    tags[key] = [existing, value];
+  } else {
+    tags[key] = [value];
+  }
+}
+
+function stripLineComment(value: string): string {
+  const index = value.indexOf('//');
+  return index >= 0 ? value.slice(0, index) : value;
+}
+
+function numbersFromText(value: string): number[] {
+  const out: number[] = [];
+  for (const match of value.matchAll(/-?\d+/g)) {
+    const parsed = Number(match[0]);
+    if (Number.isSafeInteger(parsed)) out.push(parsed);
+  }
+  return out;
+}
+
+function normalizeSkillType(value: string | undefined): 'active' | 'passive' | undefined {
+  const token = cleanPvfValue(value || '').replace(/^\[|\]$/g, '').trim().toLowerCase();
+  if (token === 'active') return 'active';
+  if (token === 'passive') return 'passive';
+  return undefined;
+}
+
+function looksLikeGuildSkill(key: string, itemName: string | undefined): boolean {
+  const normalized = normalizeUnpackKey(key);
+  const base = path.posix.basename(normalized, '.skl');
+  const name = (itemName || '').toLowerCase();
+  return /\bguild\b/i.test(normalized)
+    || base === 'statusup'
+    || base === 'experienceup'
+    || name.includes('guild')
+    || (itemName || '').includes('公会');
+}
+
+function skillKindFor(
+  key: string,
+  parsed: SimpleParsedTags,
+  itemCode: number | undefined,
+  commonSkillCodes: Set<number> | undefined,
+  itemName: string | undefined,
+): UnpackResolvedMetadata['skillKind'] | undefined {
+  const normalized = normalizeUnpackKey(key);
+  if (!normalized.endsWith('.skl')) return undefined;
+  if (looksLikeGuildSkill(normalized, itemName || parsed.name)) return 'guild';
+  if (typeof itemCode === 'number' && commonSkillCodes?.has(itemCode)) return 'common';
+  if (tagValueToInt(parsed.tags['skill class']) === 4) return 'common';
+  const type = normalizeSkillType(tagValueToString(parsed.tags.type));
+  return type;
+}
+
 function unique(values: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -339,7 +477,7 @@ function lstCandidatesForKey(key: string): string[] {
   const candidates: string[] = [];
   if (first === 'equipment') candidates.push('equipment/equipment.lst');
   if (first === 'stackable') candidates.push('stackable/stackable.lst');
-  if (first === 'skill') candidates.push('skill/skill.lst');
+  if (first === 'skill') candidates.push(...SKILL_LST_CANDIDATES);
   if (first === 'creature') candidates.push('creature/creature.lst');
   if (first === 'n_quest' || normalized.endsWith('.qst')) candidates.push('n_quest/quest.lst', 'n_quest/n_quest.lst');
   if (first) candidates.push(`${first}/${first}.lst`);
@@ -401,24 +539,23 @@ async function readStrFile(strDiskPath: string): Promise<Map<string, string>> {
 }
 
 export function parseUnpackScriptText(text: string, key = ''): Omit<UnpackResolvedMetadata, 'itemCode' | 'iconPath' | 'iconState'> {
-  if (!/\[(name|name2|set name|shop name|field name|field animation|icon|rarity|grade|small face|big face|popup face|npc|role)\]/i.test(text)) return {};
-  const parsed = parseScriptMetadata(text);
+  if (!/\[(name|name2|set name|shop name|field name|field animation|icon|rarity|grade|small face|big face|popup face|npc|role|type|skill class)\]/i.test(text)) return {};
+  const parsed = parseSimpleScriptTags(text);
   const normalizedKey = normalizeUnpackKey(key);
   const isShop = normalizedKey.endsWith('.shp');
   const itemName = parsed.name || parsed.name2 || (isShop ? pickShopNameTag(parsed.tags) : pickNameLikeTag(parsed.tags));
   const rarity = tagValueToInt(parsed.tags?.rarity);
+  const skillClass = normalizedKey.endsWith('.skl') ? tagValueToInt(parsed.tags?.['skill class']) : undefined;
   const isQuest = normalizedKey.endsWith('.qst');
   const grade = isQuest ? normalizeGrade(tagValueToString(parsed.tags?.grade)) : undefined;
-  const directIcon = parsed.icon
-    ? { imagePath: normalizeImgLogical(parsed.icon.img), frameIndex: parsed.icon.frame }
-    : undefined;
-  const icon = directIcon
+  const icon = parsed.icon
     || faceIconFromTags(parsed.tags)
     || (isQuest ? questIconFromTags(parsed.tags) : undefined);
   return {
     ...(itemName ? { itemName } : {}),
     ...(typeof rarity === 'number' ? { rarity } : {}),
     ...(grade ? { grade } : {}),
+    ...(typeof skillClass === 'number' ? { skillClass, skillClassText: skillClassText(normalizedKey, skillClass) } : {}),
     ...(icon ? { icon } : {}),
   };
 }
@@ -489,6 +626,7 @@ export class UnpackMetadataService {
   private readonly strPromises = new Map<string, Promise<StrCacheEntry | undefined>>();
   private readonly iconPromises = new Map<string, Promise<DecodedIcon | undefined>>();
   private readonly shopNpcPromises = new Map<string, Promise<ShopNpcMetadataIndex>>();
+  private readonly commonSkillCodePromises = new Map<string, Promise<Set<number>>>();
   private npkRootsCache: Promise<string[]> | undefined;
 
   constructor(
@@ -504,6 +642,7 @@ export class UnpackMetadataService {
     this.strPromises.clear();
     this.iconPromises.clear();
     this.shopNpcPromises.clear();
+    this.commonSkillCodePromises.clear();
     this.npkRootsCache = undefined;
   }
 
@@ -527,11 +666,14 @@ export class UnpackMetadataService {
     const parsed = parseUnpackScriptText(text, input.key);
     const itemCode = await this.resolveItemCode(input);
     const normalizedKey = normalizeUnpackKey(input.key);
+    const simpleParsed = normalizedKey.endsWith('.skl') ? parseSimpleScriptTags(text) : undefined;
     const itemName = parsed.itemName
       ? (normalizedKey.endsWith('.npc')
         ? await this.resolveNpcDisplayName(input.root, input.fsPath, parsed.itemName) || parsed.itemName
         : await this.resolveStringReference(input, parsed.itemName) || parsed.itemName)
       : undefined;
+    const commonSkillCodes = normalizedKey.endsWith('.skl') ? await this.loadCommonSkillCodes(input.root, input.version) : undefined;
+    const skillKind = simpleParsed ? skillKindFor(normalizedKey, simpleParsed, itemCode, commonSkillCodes, itemName) : undefined;
     const asyncNpcIcon = !parsed.icon && normalizedKey.endsWith('.npc')
       ? await this.resolveFieldAnimationIcon(input.root, input.fsPath, parseScriptMetadata(text).tags)
       : undefined;
@@ -540,6 +682,7 @@ export class UnpackMetadataService {
       ...(asyncNpcIcon ? { icon: asyncNpcIcon } : {}),
       ...(itemName ? { itemName } : {}),
       ...(typeof itemCode === 'number' ? { itemCode } : {}),
+      ...(skillKind ? { skillKind } : {}),
     };
     if (metadata.icon) metadata.iconState = 'default';
     this.metadataCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, metadata });
@@ -601,6 +744,51 @@ export class UnpackMetadataService {
       if (typeof code === 'number') return code;
     }
     return codeFromFileName(key);
+  }
+
+  private loadCommonSkillCodes(root: string, version: string): Promise<Set<number>> {
+    const cacheKey = `${path.resolve(root)}\0${version}`;
+    let promise = this.commonSkillCodePromises.get(cacheKey);
+    if (!promise) {
+      promise = this.readCommonSkillCodes(root);
+      this.commonSkillCodePromises.set(cacheKey, promise);
+    }
+    return promise;
+  }
+
+  private async readCommonSkillCodes(root: string): Promise<Set<number>> {
+    const filePath = safeJoinArchivePath(root, 'clientonly/commonskilllist.co');
+    if (!filePath) return new Set();
+    let text = '';
+    try {
+      text = await readUtf8Text(filePath);
+    } catch {
+      return new Set();
+    }
+
+    const codes = new Set<number>();
+    let inCommonSkill = false;
+    for (const rawLine of text.replace(/\r\n?/g, '\n').split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+      const tag = line.match(/^\[([^\]]+)\]/);
+      if (tag) {
+        const name = tag[1].trim().toLowerCase();
+        if (name === 'common skill') {
+          inCommonSkill = true;
+          const inline = line.slice(tag[0].length);
+          for (const code of numbersFromText(inline)) codes.add(code);
+          continue;
+        }
+        if (name === '/common skill') {
+          inCommonSkill = false;
+          continue;
+        }
+      }
+      if (!inCommonSkill) continue;
+      for (const code of numbersFromText(stripLineComment(line))) codes.add(code);
+    }
+    return codes;
   }
 
   private async loadLst(lstDiskPath: string): Promise<LstCacheEntry | undefined> {

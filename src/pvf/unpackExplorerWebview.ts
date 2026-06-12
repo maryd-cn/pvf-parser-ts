@@ -37,6 +37,9 @@ interface UnpackExplorerRow {
   rarity?: number;
   grade?: string;
   rarityLabel?: string;
+  skillClass?: number;
+  skillClassText?: string;
+  skillKind?: UnpackResolvedMetadata['skillKind'];
   icon?: {
     src: string;
     displayWidth: number;
@@ -87,6 +90,14 @@ function codeTextFor(code: number | undefined): string | undefined {
   if (typeof code !== 'number') return undefined;
   const format = vscode.workspace.getConfiguration().get<string>('pvf.unpackExplorer.metadata.itemCodeFormat', '<{code}>') || '<{code}>';
   return format.replace(/\{code\}/g, String(code));
+}
+
+function skillKindLabel(kind: UnpackResolvedMetadata['skillKind']): string {
+  if (kind === 'active') return '主动';
+  if (kind === 'passive') return '被动';
+  if (kind === 'common') return '通用';
+  if (kind === 'guild') return '公会';
+  return '';
 }
 
 function previewText(preview: UnpackHoverPreview): string {
@@ -632,6 +643,9 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       ...(typeof metadata?.itemCode === 'number' ? { itemCode: metadata.itemCode, itemCodeText: codeTextFor(metadata.itemCode) } : {}),
       ...(typeof metadata?.rarity === 'number' ? { rarity: metadata.rarity, rarityLabel: rarityLabel(metadata.rarity) } : {}),
       ...(metadata?.grade ? { grade: metadata.grade } : {}),
+      ...(typeof metadata?.skillClass === 'number' ? { skillClass: metadata.skillClass } : {}),
+      ...(metadata?.skillClassText ? { skillClassText: metadata.skillClassText } : {}),
+      ...(metadata?.skillKind ? { skillKind: metadata.skillKind } : {}),
       tooltip: this.tooltipFor(element, comment, metadata),
     };
     const icon = this.iconFor(metadata);
@@ -762,6 +776,8 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       comment ? `注释: ${comment}` : undefined,
       metadata?.itemName ? `名称: ${metadata.itemName}` : undefined,
       typeof metadata?.itemCode === 'number' ? `代码: ${metadata.itemCode}` : undefined,
+      metadata?.skillKind ? `技能类型: ${skillKindLabel(metadata.skillKind)}` : undefined,
+      typeof metadata?.skillClass === 'number' ? `技能类: ${metadata.skillClassText || metadata.skillClass}` : undefined,
       typeof metadata?.rarity === 'number' ? `稀有度: ${metadata.rarity}${rarityLabel(metadata.rarity) ? ` ${rarityLabel(metadata.rarity)}` : ''}` : undefined,
       metadata?.grade ? `任务品级: ${metadata.grade}` : undefined,
       metadata?.icon ? `图标: ${metadata.icon.imagePath} #${metadata.icon.frameIndex}` : undefined,
@@ -796,6 +812,10 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
   --icon-size: ${configNumber('pvf.unpackExplorer.npkIcon.size', 16)}px;
   --string-color: var(--vscode-pvf-unpackStringForeground, #ce9178);
   --number-color: var(--vscode-pvf-unpackNumberForeground, #b5cea8);
+  --skill-active-color: var(--vscode-pvf-skillActiveForeground, #ffe88c);
+  --skill-passive-color: var(--vscode-pvf-skillPassiveForeground, #aee080);
+  --skill-common-color: var(--vscode-pvf-skillCommonForeground, #0096ff);
+  --skill-guild-color: var(--vscode-pvf-skillGuildForeground, #ffafff);
   --rarity-0: var(--vscode-pvf-rarity0Foreground, #d4d4d4);
   --rarity-1: var(--vscode-pvf-rarity1Foreground, #68d5ed);
   --rarity-2: var(--vscode-pvf-rarity2Foreground, #b36bff);
@@ -899,6 +919,11 @@ body {
 .comment { color: var(--vscode-descriptionForeground); }
 .item-name.string { color: var(--string-color); }
 .item-code { color: var(--number-color); }
+.skill-class { color: var(--number-color); }
+.skill-active { color: var(--skill-active-color); }
+.skill-passive { color: var(--skill-passive-color); }
+.skill-common { color: var(--skill-common-color); }
+.skill-guild { color: var(--skill-guild-color); }
 .rarity-0 { color: var(--rarity-0); }
 .rarity-1 { color: var(--rarity-1); }
 .rarity-2 { color: var(--rarity-2); }

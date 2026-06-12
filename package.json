@@ -904,6 +904,42 @@
         }
       },
       {
+        "id": "pvf.skillActiveForeground",
+        "description": "PVF 解包目录中主动技能名称前景色。",
+        "defaults": {
+          "dark": "#FFE88C",
+          "light": "#8A6A00",
+          "highContrast": "#FFE88C"
+        }
+      },
+      {
+        "id": "pvf.skillPassiveForeground",
+        "description": "PVF 解包目录中被动技能名称前景色。",
+        "defaults": {
+          "dark": "#AEE080",
+          "light": "#267A38",
+          "highContrast": "#AEE080"
+        }
+      },
+      {
+        "id": "pvf.skillCommonForeground",
+        "description": "PVF 解包目录中通用技能名称前景色。",
+        "defaults": {
+          "dark": "#0096FF",
+          "light": "#005FB8",
+          "highContrast": "#4AABFF"
+        }
+      },
+      {
+        "id": "pvf.skillGuildForeground",
+        "description": "PVF 解包目录中公会技能名称前景色。",
+        "defaults": {
+          "dark": "#FFAFFF",
+          "light": "#A83FA8",
+          "highContrast": "#FFAFFF"
+        }
+      },
+      {
         "id": "pvf.rarity0Foreground",
         "description": "PVF rarity 0 普通前景色。",
         "defaults": {
@@ -1022,12 +1058,12 @@
         "pvf.unpackExplorer.metadata.showItemCode": {
           "type": "boolean",
           "default": true,
-          "description": "解包目录是否显示来自 .lst 映射的物品代码。"
+          "description": "解包目录是否显示来自 .lst 映射或文件名解析出的物品、技能等资源代码。"
         },
         "pvf.unpackExplorer.metadata.itemCodeFormat": {
           "type": "string",
           "default": "<{code}>",
-          "description": "解包目录物品代码显示格式。使用 {code} 作为数字占位符。"
+          "description": "解包目录资源代码显示格式。使用 {code} 作为数字占位符。"
         },
         "pvf.unpackExplorer.hoverPreview.enabled": {
           "type": "boolean",
