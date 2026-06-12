@@ -46,6 +46,13 @@ interface UnpackExplorerRow {
   tooltip: string;
 }
 
+interface UnpackExplorerReveal {
+  targetId: string;
+  pathIds: string[];
+  key: string;
+  fsPath: string;
+}
+
 async function readManifest(file: string): Promise<PvfDirectoryManifest | undefined> {
   try {
     return JSON.parse(await fs.readFile(file, 'utf8')) as PvfDirectoryManifest;
@@ -159,6 +166,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
   private activePreviewElement: UnpackExplorerEntry | undefined;
   private activeEditorPreviewPath = '';
   private editorPreviewTimer: NodeJS.Timeout | undefined;
+  private pendingReveal: UnpackExplorerReveal | undefined;
   private generation = 0;
 
   constructor(
@@ -194,7 +202,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     webviewView.webview.onDidReceiveMessage(message => {
       void this.handleMessage(message);
     });
-    void this.postRoots();
+    void this.postRoots().then(() => this.syncActiveEditorToExplorer(false));
   }
 
   refresh(): void {
@@ -216,7 +224,8 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     this.activeEditorPreviewPath = '';
     if (this.editorPreviewTimer) clearTimeout(this.editorPreviewTimer);
     this.editorPreviewTimer = undefined;
-    void this.postRoots();
+    this.pendingReveal = undefined;
+    void this.postRoots().then(() => this.syncActiveEditorToExplorer(false));
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -356,17 +365,26 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async onActiveTextEditorChanged(editor: vscode.TextEditor | undefined): Promise<void> {
-    if (!this.shouldOpenPreviewWithTextEditor()) return;
     const uri = editor?.document.uri;
-    if (!uri || uri.scheme !== 'file') return;
+    if (!uri || uri.scheme !== 'file') {
+      this.pendingReveal = undefined;
+      return;
+    }
     const fsPath = path.resolve(uri.fsPath);
-    if (this.activeEditorPreviewPath === fsPath) return;
     if (this.editorPreviewTimer) clearTimeout(this.editorPreviewTimer);
     this.editorPreviewTimer = setTimeout(() => {
       this.editorPreviewTimer = undefined;
-      if (this.activeEditorPreviewPath === fsPath) return;
-      void this.openPreviewForDiskFile(fsPath, true, false);
+      void this.syncDiskFileWithExplorer(fsPath, true, false, true);
     }, 120);
+  }
+
+  private syncActiveEditorToExplorer(openPreview: boolean): void {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    if (!uri || uri.scheme !== 'file') {
+      this.pendingReveal = undefined;
+      return;
+    }
+    void this.syncDiskFileWithExplorer(path.resolve(uri.fsPath), openPreview, false, true);
   }
 
   private async onTextDocumentSaved(document: vscode.TextDocument): Promise<void> {
@@ -375,24 +393,37 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     const fsPath = path.resolve(document.uri.fsPath);
     const activePath = this.activePreviewElement ? path.resolve(this.activePreviewElement.fsPath) : '';
     if (activePath && activePath === fsPath) {
-      await this.openPreviewForDiskFile(fsPath, true, true);
+      await this.syncDiskFileWithExplorer(fsPath, true, true);
       return;
     }
     const activeEditor = vscode.window.activeTextEditor?.document.uri;
     if (activeEditor?.scheme === 'file' && path.resolve(activeEditor.fsPath) === fsPath) {
-      await this.openPreviewForDiskFile(fsPath, true, true);
+      await this.syncDiskFileWithExplorer(fsPath, true, true);
     }
   }
 
-  private async openPreviewForDiskFile(fsPath: string, preserveFocus: boolean, forceRefresh: boolean): Promise<void> {
-    const element = await this.entryFromDiskFile(fsPath);
-    if (!element || !this.canPreviewElement(element)) return;
-    this.activeEditorPreviewPath = path.resolve(fsPath);
+  private async syncDiskFileWithExplorer(fsPath: string, openPreview: boolean, forceRefresh: boolean, requireActive = false): Promise<void> {
+    const resolved = path.resolve(fsPath);
+    const element = await this.entryFromDiskFile(resolved);
+    if (requireActive && !this.isActiveDiskFile(resolved)) return;
+    if (!element) {
+      this.pendingReveal = undefined;
+      return;
+    }
+    await this.revealElement(element);
+    if (!openPreview || !this.shouldOpenPreviewWithTextEditor() || !this.canPreviewElement(element)) return;
+    if (!forceRefresh && this.activeEditorPreviewPath === resolved) return;
+    this.activeEditorPreviewPath = resolved;
     if (forceRefresh) {
       this.preview.invalidate(element);
       this.queueRowRefresh(element);
     }
-    await this.showPreviewPanelForElement(element, preserveFocus);
+    await this.showPreviewPanelForElement(element, true);
+  }
+
+  private isActiveDiskFile(fsPath: string): boolean {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    return !!uri && uri.scheme === 'file' && path.resolve(uri.fsPath) === path.resolve(fsPath);
   }
 
   private shouldOpenPreviewWithTextEditor(): boolean {
@@ -451,6 +482,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       rows: roots.map(root => this.rowFor(root)),
       empty: roots.length === 0,
     });
+    await this.postPendingReveal();
   }
 
   private async postChildren(parent: UnpackExplorerEntry): Promise<void> {
@@ -469,6 +501,60 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       type: 'children',
       id: stableId(parent),
       rows: rows.map(row => this.rowFor(row)),
+    });
+  }
+
+  private async revealElement(element: UnpackExplorerEntry): Promise<void> {
+    const reveal = this.revealForElement(element);
+    this.pendingReveal = reveal;
+    await this.postPendingReveal();
+  }
+
+  private revealForElement(element: UnpackExplorerEntry): UnpackExplorerReveal {
+    const pathIds: string[] = [];
+    const rootEntry: UnpackExplorerEntry = {
+      fsPath: element.root,
+      key: '',
+      name: path.basename(path.resolve(element.root)) || element.root,
+      isDirectory: true,
+      root: element.root,
+      version: element.version,
+    };
+    pathIds.push(stableId(rootEntry));
+    const segments = normalizeTreeCommentPath(element.key).split('/').filter(Boolean);
+    let key = '';
+    let fsPath = element.root;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      key = key ? `${key}/${segment}` : segment;
+      fsPath = path.join(fsPath, segment);
+      pathIds.push(stableId({
+        fsPath,
+        key,
+        name: segment,
+        isDirectory: index < segments.length - 1 || element.isDirectory,
+        root: element.root,
+        version: element.version,
+      }));
+    }
+    return {
+      targetId: pathIds[pathIds.length - 1],
+      pathIds,
+      key: element.key,
+      fsPath: element.fsPath,
+    };
+  }
+
+  private async postPendingReveal(): Promise<void> {
+    const view = this.webviewView;
+    const reveal = this.pendingReveal;
+    if (!view || !reveal) return;
+    await view.webview.postMessage({
+      type: 'reveal',
+      targetId: reveal.targetId,
+      pathIds: reveal.pathIds,
+      key: reveal.key,
+      fsPath: reveal.fsPath,
     });
   }
 

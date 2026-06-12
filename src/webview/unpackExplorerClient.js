@@ -12,6 +12,7 @@
   const pendingPreviewTimers = new Map();
   const postedPreviewRequests = new Map();
   let selectedId = '';
+  let pendingReveal = null;
   let hoverTimer = 0;
   let closeTimer = 0;
   let hoverRequestId = 0;
@@ -28,6 +29,13 @@
 
   function post(type, payload = {}) {
     vscode.postMessage({ type, ...payload });
+  }
+
+  function sameReveal(left, right) {
+    if (!left || !right) return false;
+    return String(left.targetId || '') === String(right.targetId || '')
+      && String(left.key || '') === String(right.key || '')
+      && String(left.fsPath || '') === String(right.fsPath || '');
   }
 
   function clear(node) {
@@ -292,8 +300,8 @@
     removeLoading(parentId);
     childrenCache.set(parentId, dataRows || []);
     parent.dataset.loaded = '1';
-    if (parent.dataset.expanded !== '1') return;
-    renderChildRows(parent, dataRows);
+    if (parent.dataset.expanded === '1') renderChildRows(parent, dataRows);
+    applyPendingReveal();
   }
 
   function updateRow(row) {
@@ -347,6 +355,54 @@
       tree.appendChild(element);
       rows.set(row.id, element);
     }
+    applyPendingReveal();
+  }
+
+  function reveal(message) {
+    const next = {
+      targetId: String(message.targetId || ''),
+      pathIds: Array.isArray(message.pathIds) ? message.pathIds.map(String).filter(Boolean) : [],
+      key: String(message.key || ''),
+      fsPath: String(message.fsPath || ''),
+    };
+    if (!next.targetId || next.pathIds.length === 0) return;
+    if (sameReveal(pendingReveal, next)) {
+      applyPendingReveal();
+      return;
+    }
+    pendingReveal = next;
+    applyPendingReveal();
+  }
+
+  function applyPendingReveal() {
+    if (!pendingReveal) return;
+    const ids = pendingReveal.pathIds || [];
+    if (ids.length === 0) return;
+    if (!rows.has(ids[0])) return;
+
+    for (let index = 0; index < ids.length - 1; index++) {
+      const id = ids[index];
+      const element = rows.get(id);
+      if (!element || element.dataset.directory !== '1') return;
+      if (element.dataset.expanded !== '1') setExpanded(element, true);
+      if (childrenCache.has(id)) {
+        if (!rows.has(ids[index + 1])) renderChildRows(element, childrenCache.get(id));
+        continue;
+      }
+      if (element.dataset.loaded !== '1') scheduleChildLoading(id, element);
+      if (!pendingChildRequests.has(id)) {
+        pendingChildRequests.add(id);
+        post('children', { id });
+      }
+      return;
+    }
+
+    const target = rows.get(pendingReveal.targetId);
+    if (!target) return;
+    closePreview();
+    select(pendingReveal.targetId);
+    target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    pendingReveal = null;
   }
 
   function showMenu(event, row) {
@@ -791,6 +847,10 @@
     const message = event.data || {};
     if (message.type === 'roots') {
       setRoots(message.rows || [], !!message.empty);
+      return;
+    }
+    if (message.type === 'reveal') {
+      reveal(message);
       return;
     }
     if (message.type === 'children') {
