@@ -4271,7 +4271,11 @@
   },
   "versions": {
     "66282": {
-      "comments": {}
+      "comments": {
+        "equipment/character/swordman/avatar": {
+          "comment": "时装"
+        }
+      }
     }
   }
 }
