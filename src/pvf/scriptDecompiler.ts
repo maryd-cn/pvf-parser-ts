@@ -31,6 +31,7 @@ function formatFloat(n: number): string {
 
 export function decompileScript(model: any, f: PvfFile): string {
   const data = f.data!;
+  const isSklFile = f.fileName.endsWith('.skl');
   const types: number[] = [];
   const values: number[] = [];
   for (let i = 2; i < f.dataLen - 4; i += 5) {
@@ -110,6 +111,18 @@ export function decompileScript(model: any, f: PvfFile): string {
 
   const emitDataLine = (content: string) => {
     emitLine(content, dataExtraIndent());
+  };
+
+  const emitSklLevelInfoLines = (tokens: string[]): boolean => {
+    if (!isSklFile || currentSection !== '[level info]' || tokens.length === 0) return false;
+    const colCount = Number(tokens[0]);
+    if (!Number.isInteger(colCount) || colCount <= 0) return false;
+
+    emitDataLine(tokens[0]);
+    for (let start = 1; start < tokens.length; start += colCount) {
+      emitDataLine(tokens.slice(start, start + colCount).join('\t'));
+    }
+    return true;
   };
 
   const renderStringLink = (id: number, nameIdx: number): string => {
@@ -252,6 +265,7 @@ export function decompileScript(model: any, f: PvfFile): string {
       i++;
     }
     if (line.length) {
+      if (emitSklLevelInfoLines(line)) continue;
       const trailingTab = currentSection === '[piece set ability]' && line.length === 1 ? '\t' : '';
       emitDataLine(line.join('\t') + trailingTab);
     }
