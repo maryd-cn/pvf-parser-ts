@@ -48,11 +48,19 @@ export interface UnpackPreviewEntry {
   icon?: UnpackPreviewIcon;
 }
 
+export interface UnpackPreviewTable {
+  caption?: string;
+  headers: string[];
+  rows: string[][];
+  tagName?: string;
+}
+
 export interface UnpackPreviewSection {
   title: string;
   fields?: UnpackPreviewField[];
   lines?: string[];
   entries?: UnpackPreviewEntry[];
+  tables?: UnpackPreviewTable[];
   tone?: 'normal' | 'blue' | 'flavor' | 'set' | 'shop' | 'quest' | 'skill';
 }
 
@@ -68,6 +76,28 @@ export interface UnpackPreviewMiniMap {
   points: UnpackPreviewMiniMapPoint[];
 }
 
+export interface UnpackPreviewSkillTreeNode {
+  code: number;
+  name?: string;
+  key?: string;
+  fsPath?: string;
+  icon?: UnpackPreviewIcon;
+  x?: number;
+  y?: number;
+  common?: boolean;
+  unresolved?: boolean;
+  nextSkills?: number[];
+}
+
+export interface UnpackPreviewSkillTreeGroup {
+  title: string;
+  job?: string;
+  jobLabel?: string;
+  branch?: string;
+  branchLabel?: string;
+  nodes: UnpackPreviewSkillTreeNode[];
+}
+
 export interface UnpackHoverPreview {
   kind: UnpackPreviewKind;
   title: string;
@@ -81,6 +111,7 @@ export interface UnpackHoverPreview {
   badges?: string[];
   sections: UnpackPreviewSection[];
   miniMap?: UnpackPreviewMiniMap;
+  skillTrees?: UnpackPreviewSkillTreeGroup[];
   message?: string;
   text?: string;
 }
@@ -127,6 +158,31 @@ interface PreviewTagTitle {
 
 type PreviewTagTitles = ReadonlyMap<string, PreviewTagTitle>;
 
+interface SkillDataParameterFile {
+  skills?: Record<string, SkillDataParameterSkill | undefined>;
+  byCode?: Record<string, string | string[] | undefined>;
+}
+
+interface SkillDataParameterSkill {
+  name?: string;
+  codes?: number[];
+  scenes?: Record<string, SkillDataParameterScene | undefined>;
+  references?: {
+    nut?: string[];
+    ani?: string[];
+  };
+}
+
+interface SkillDataParameterScene {
+  levelInfo?: Record<string, string | string[] | undefined>;
+  staticData?: Record<string, string | string[] | undefined>;
+}
+
+interface SkillDataParameterConfig {
+  byPath: Map<string, SkillDataParameterSkill>;
+  byCode: Map<number, Array<{ key: string; skill: SkillDataParameterSkill }>>;
+}
+
 interface CodeReference {
   code: number;
   key?: string;
@@ -140,9 +196,14 @@ interface SkillTreeNode {
   code: number;
   x?: number;
   y?: number;
-  branch?: string;
   common?: boolean;
   nextSkills: number[];
+}
+
+interface ParsedSkillTreeGroup {
+  job?: string;
+  branch?: string;
+  nodes: SkillTreeNode[];
 }
 
 const EQUIPMENT_LST = ['equipment/equipment.lst'];
@@ -389,6 +450,7 @@ export class UnpackPreviewService {
   private readonly lstCache = new Map<string, LstCacheEntry | undefined>();
   private readonly lstPromises = new Map<string, Promise<LstCacheEntry | undefined>>();
   private readonly tagTitlePromises = new Map<string, Promise<Map<string, PreviewTagTitle>>>();
+  private skillDataParametersPromise: Promise<SkillDataParameterConfig> | undefined;
 
   constructor(
     private readonly metadata: UnpackMetadataService,
@@ -401,6 +463,7 @@ export class UnpackPreviewService {
     this.lstCache.clear();
     this.lstPromises.clear();
     this.tagTitlePromises.clear();
+    this.skillDataParametersPromise = undefined;
   }
 
   invalidate(input: UnpackPreviewInput): void {
@@ -436,7 +499,8 @@ export class UnpackPreviewService {
         });
         latestMetadata = this.metadata.getCached(input) || latestMetadata;
       }
-      const preview = await this.buildPreview(input, text, resolvedKind, latestMetadata);
+      const preview = await this.buildPreview(input, text, resolvedKind, latestMetadata, options);
+      latestMetadata = this.metadata.getCached(input) || latestMetadata;
       this.cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, iconSettled: previewIconSettled(latestMetadata, shouldResolveIcon), preview });
       return preview;
     } catch (err: any) {
@@ -462,6 +526,7 @@ export class UnpackPreviewService {
     text: string,
     kind: UnpackPreviewKind,
     metadata: UnpackResolvedMetadata | undefined,
+    options: UnpackPreviewOptions = {},
   ): Promise<UnpackHoverPreview> {
     const tags = parseTags(text);
     switch (kind) {
@@ -470,8 +535,8 @@ export class UnpackPreviewService {
       case 'stackable': return this.buildStackablePreview(input, tags, metadata);
       case 'shop': return this.buildShopPreview(input, tags, metadata);
       case 'quest': return this.buildQuestPreview(input, tags, metadata);
-      case 'skill': return this.buildSkillPreview(input, tags, metadata);
-      case 'skillTree': return this.buildSkillTreePreview(input, text, tags, metadata);
+      case 'skill': return this.buildSkillPreview(input, text, tags, metadata);
+      case 'skillTree': return this.buildSkillTreePreview(input, text, tags, metadata, options);
       default: return this.errorPreview(input, '不支持的预览类型');
     }
   }
@@ -627,6 +692,7 @@ export class UnpackPreviewService {
 
   private async buildSkillPreview(
     input: UnpackPreviewInput,
+    text: string,
     tags: ParsedTags,
     metadata: UnpackResolvedMetadata | undefined,
   ): Promise<UnpackHoverPreview> {
@@ -650,7 +716,11 @@ export class UnpackPreviewService {
     addTextSection(sections, '技能属性', tagLines(tags, 'level property', 'special level up'), 'blue');
     addTextSection(sections, '前置/消耗', tagLines(tags, 'pre required skill', 'consume item', 'purchase cost', 'special purchase cost'), 'skill');
     addTextSection(sections, '指令', tagLines(tags, 'command', 'command key explain', 'skill command advantage'), 'skill');
-    addTextSection(sections, '特殊效果', tagLines(tags, 'static data', 'level info', 'skill under cooltime effect', 'skill under cooltime effect each'), 'blue');
+    const dataParameterConfig = await this.loadSkillDataParameters();
+    const dataParameters = findSkillDataParameters(dataParameterConfig, input, metadata);
+    const dataTables = buildSkillDataTables(text, dataParameters);
+    if (dataTables.length) sections.push({ title: '动态/静态数据', tables: dataTables, tone: 'blue' });
+    addTextSection(sections, '特殊效果', tagLines(tags, 'skill under cooltime effect', 'skill under cooltime effect each'), 'blue');
     return this.basePreview(input, metadata, 'skill', displayTitle(input, tags, metadata), '技能', sections);
   }
 
@@ -659,55 +729,55 @@ export class UnpackPreviewService {
     text: string,
     tags: ParsedTags,
     metadata: UnpackResolvedMetadata | undefined,
+    options: UnpackPreviewOptions = {},
   ): Promise<UnpackHoverPreview> {
-    const nodes = parseSkillTreeNodes(text);
+    const groups = parseSkillTreeGroups(text);
+    const nodes = groups.flatMap(group => group.nodes);
     const treeType = skillTreeType(input.key);
-    const job = firstSkillTreeJob(text) || labelToken(firstValue(tags, 'character job'));
-    const lsts = skillLstsForJob(job);
-    const titles = await this.loadTagTitles(skillTreeTagShort(input.key));
-    const entries: UnpackPreviewEntry[] = [];
+    const firstJob = groups.find(group => group.job)?.job || firstSkillTreeJob(text) || labelToken(firstValue(tags, 'character job'));
     let resolvedCount = 0;
-    for (const node of nodes.slice(0, 120)) {
-      const ref = await this.resolveCode(input, node.code, node.common ? COMMON_SKILL_LSTS : lsts);
-      if (ref.key) resolvedCount++;
-      entries.push({
-        code: node.code,
-        name: ref.name,
-        key: ref.key,
-        x: node.x,
-        y: node.y,
-        branch: node.branch,
-        common: node.common,
-        unresolved: !ref.key,
-        icon: iconFromMetadata(ref.metadata),
-        detail: node.nextSkills.length ? `关联: ${node.nextSkills.join(', ')}` : undefined,
+    const skillTrees: UnpackPreviewSkillTreeGroup[] = [];
+    for (const group of groups) {
+      const lsts = skillLstsForJob(group.job);
+      const treeNodes: UnpackPreviewSkillTreeNode[] = [];
+      for (const node of group.nodes) {
+        const ref = await this.resolveCode(input, node.code, node.common ? COMMON_SKILL_LSTS : lsts, options.resolveIcon === true);
+        if (ref.key) resolvedCount++;
+        treeNodes.push({
+          code: node.code,
+          name: ref.name,
+          key: ref.key,
+          fsPath: ref.fsPath,
+          x: node.x,
+          y: node.y,
+          common: node.common,
+          unresolved: !ref.key,
+          icon: iconFromMetadata(ref.metadata),
+          ...(node.nextSkills.length ? { nextSkills: node.nextSkills } : {}),
+        });
+      }
+      const jobLabel = group.job ? labelJob(group.job) : undefined;
+      const branchLabel = group.branch ? labelJob(group.branch) : undefined;
+      skillTrees.push({
+        title: [jobLabel, branchLabel].filter(Boolean).join(' / ') || '技能树',
+        ...(group.job ? { job: group.job, jobLabel } : {}),
+        ...(group.branch ? { branch: group.branch, branchLabel } : {}),
+        nodes: treeNodes,
       });
     }
-    const fields = compactFields([
-      field('类型', treeType),
-      tagField(titles, 'character job', '职业', job ? labelJob(job) : undefined),
-      field('节点数', String(nodes.length)),
-      field('已解析', `${resolvedCount}/${nodes.length}`),
-    ]);
-    const sections: UnpackPreviewSection[] = [
-      { title: '技能树信息', fields, tone: 'skill' },
-      { title: '技能节点', entries, tone: 'skill' },
-    ];
     return {
-      ...this.basePreview(input, metadata, 'skillTree', skillTreeTitle(input, job), '技能树', sections),
+      kind: 'skillTree',
+      title: skillTreeTitle(input, firstJob),
+      subtitle: '技能树',
+      key: input.key,
+      fsPath: input.fsPath,
+      ...(typeof metadata?.itemCode === 'number' ? { itemCode: metadata.itemCode } : {}),
+      ...(typeof metadata?.rarity === 'number' ? { rarity: metadata.rarity, rarityLabel: rarityLabel(metadata.rarity) } : {}),
+      ...(iconFromMetadata(metadata) ? { icon: iconFromMetadata(metadata) } : {}),
+      sections: [],
       badges: [treeType],
-      miniMap: {
-        points: nodes
-          .filter(node => typeof node.x === 'number' && typeof node.y === 'number')
-          .slice(0, 160)
-          .map(node => ({
-            x: node.x || 0,
-            y: node.y || 0,
-            resolved: entries.some(entry => entry.code === node.code && !entry.unresolved),
-            common: node.common,
-            label: String(node.code),
-          })),
-      },
+      skillTrees,
+      ...(nodes.length ? {} : { message: '没有解析到可绘制的技能树节点。' }),
     };
   }
 
@@ -777,6 +847,29 @@ export class UnpackPreviewService {
     return new Map<string, PreviewTagTitle>();
   }
 
+  private async loadSkillDataParameters(): Promise<SkillDataParameterConfig> {
+    if (!this.skillDataParametersPromise) {
+      this.skillDataParametersPromise = this.readSkillDataParameters();
+    }
+    return this.skillDataParametersPromise;
+  }
+
+  private async readSkillDataParameters(): Promise<SkillDataParameterConfig> {
+    const empty: SkillDataParameterConfig = { byPath: new Map(), byCode: new Map() };
+    const candidates = [
+      path.join(this.context.extensionUri.fsPath, 'dist', 'config', 'pvf', 'skillDataParameters.json'),
+      path.join(this.context.extensionUri.fsPath, 'src', 'config', 'pvf', 'skillDataParameters.json'),
+    ];
+    for (const candidate of candidates) {
+      try {
+        const raw = await fs.readFile(candidate, 'utf8');
+        return normalizeSkillDataParameterFile(JSON.parse(raw) as SkillDataParameterFile);
+      } catch {
+      }
+    }
+    return empty;
+  }
+
   private async resolveEntries(
     values: Array<{ code: number; quantity?: number; detail?: string }>,
     input: UnpackPreviewInput,
@@ -803,7 +896,7 @@ export class UnpackPreviewService {
     return entries;
   }
 
-  private async resolveCode(input: UnpackPreviewInput, code: number, lstKeys: string[]): Promise<CodeReference> {
+  private async resolveCode(input: UnpackPreviewInput, code: number, lstKeys: string[], resolveIcon = false): Promise<CodeReference> {
     for (const lstKey of lstKeys) {
       const lstPath = safeJoinArchivePath(input.root, lstKey);
       if (!lstPath) continue;
@@ -822,6 +915,9 @@ export class UnpackPreviewService {
       let refMeta: UnpackResolvedMetadata | undefined;
       try {
         refMeta = await this.metadata.resolveMetadata(refInput);
+        if (resolveIcon && refMeta?.icon) {
+          refMeta = await this.metadata.resolveIcon(refInput) || refMeta;
+        }
       } catch (err: any) {
         this.output?.appendLine(`[PVF] failed to resolve preview reference ${code} -> ${key}: ${String(err && err.message || err)}`);
       }
@@ -1053,6 +1149,425 @@ function tradeText(value: string | undefined): string | undefined {
   return TRADE_LABELS[normalized] || token;
 }
 
+type SkillDataKind = 'level' | 'static';
+
+interface SkillDataScene {
+  key: string;
+  label: string;
+  levelInfo: string[][];
+  staticData: string[];
+  levelProperty: string[];
+}
+
+interface SkillDataLabelRef {
+  kind: SkillDataKind;
+  index: number;
+  label: string;
+}
+
+const SKILL_SCENE_LABELS: Record<string, string> = {
+  default: '默认/通用',
+  dungeon: '地下城',
+  pvp: '决斗场',
+  'death tower': '死亡之塔',
+  warroom: '战争房间',
+};
+
+const SKILL_SCENE_TAGS = new Set(Object.keys(SKILL_SCENE_LABELS).filter(key => key !== 'default'));
+
+const SKILL_DAMAGE_SOURCE_LABELS: Record<number, string> = {
+  [-1]: '百分比伤害',
+  [-2]: '独立攻击力',
+  [-3]: '中毒伤害',
+  [-4]: '出血伤害',
+  [-5]: '灼伤伤害',
+  [-6]: '感电伤害',
+  [-7]: '石化伤害',
+};
+
+function buildSkillDataTables(text: string, parameters?: SkillDataParameterSkill): UnpackPreviewTable[] {
+  const scenes = parseSkillDataScenes(text);
+  const defaultRefs = parseSkillPropertyRefs(scenes.get('default')?.levelProperty || []);
+  const out: UnpackPreviewTable[] = [];
+
+  for (const scene of scenes.values()) {
+    const configRefs = refsFromSkillDataParameters(parameters, scene.key);
+    const refs = mergeSkillDataLabelRefs(configRefs, mergeSkillDataLabelRefs(defaultRefs, parseSkillPropertyRefs(scene.levelProperty)));
+    const levelLabels = labelsFromRefs(refs, 'level');
+    const staticLabels = labelsFromRefs(refs, 'static');
+
+    if (scene.levelInfo.length) {
+      out.push({
+        caption: `${scene.label} - [level info]`,
+        tagName: 'level info',
+        headers: ['等级', ...scene.levelInfo[0].map((_value, idx) => skillDataLabel(levelLabels, idx, '动态'))],
+        rows: scene.levelInfo.map((row, idx) => [`Lv.${idx + 1}`, ...row]),
+      });
+    }
+
+    if (scene.staticData.length) {
+      out.push({
+        caption: `${scene.label} - [static data]`,
+        tagName: 'static data',
+        headers: ['索引', '含义', '值'],
+        rows: scene.staticData.map((value, idx) => [String(idx), skillDataLabel(staticLabels, idx, '静态'), value]),
+      });
+    }
+  }
+
+  return out;
+}
+
+function parseSkillDataScenes(text: string): Map<string, SkillDataScene> {
+  const scenes = new Map<string, SkillDataScene>();
+  const getScene = (key: string): SkillDataScene => {
+    const normalized = key || 'default';
+    let scene = scenes.get(normalized);
+    if (!scene) {
+      scene = {
+        key: normalized,
+        label: SKILL_SCENE_LABELS[normalized] || normalized,
+        levelInfo: [],
+        staticData: [],
+        levelProperty: [],
+      };
+      scenes.set(normalized, scene);
+    }
+    return scene;
+  };
+
+  getScene('default');
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const sceneStack: string[] = ['default'];
+  let currentBlock: 'level info' | 'static data' | 'level property' | '' = '';
+  let inBlockComment = false;
+
+  for (const rawLine of lines) {
+    let lineText = rawLine;
+    if (inBlockComment) {
+      const end = lineText.indexOf('*/');
+      if (end < 0) continue;
+      lineText = lineText.slice(end + 2);
+      inBlockComment = false;
+    }
+    const blockStart = lineText.indexOf('/*');
+    if (blockStart >= 0) {
+      const blockEnd = lineText.indexOf('*/', blockStart + 2);
+      if (blockEnd >= 0) {
+        lineText = lineText.slice(0, blockStart) + lineText.slice(blockEnd + 2);
+      } else {
+        lineText = lineText.slice(0, blockStart);
+        inBlockComment = true;
+      }
+    }
+    const trimmed = lineText.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    const tag = trimmed.match(/^\[([^\]]+)\]/);
+    if (tag) {
+      const name = tag[1].trim().toLowerCase();
+      if (name.startsWith('/')) {
+        const closeName = name.slice(1).trim();
+        if (currentBlock === closeName) currentBlock = '';
+        if (SKILL_SCENE_TAGS.has(closeName) && sceneStack.length > 1) sceneStack.pop();
+        continue;
+      }
+      if (SKILL_SCENE_TAGS.has(name)) {
+        sceneStack.push(name);
+        getScene(name);
+        currentBlock = '';
+        continue;
+      }
+      if (name === 'level info' || name === 'static data' || name === 'level property') {
+        currentBlock = name;
+        getScene(sceneStack[sceneStack.length - 1]);
+        const inline = stripLineComment(trimmed.slice(tag[0].length)).trim();
+        if (inline) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, inline);
+        continue;
+      }
+      if (currentBlock) {
+        appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed);
+      }
+      continue;
+    }
+    if (currentBlock) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed);
+  }
+
+  for (const scene of scenes.values()) {
+    scene.levelInfo = normalizeLevelInfoRows(scene.levelInfo);
+  }
+
+  for (const [key, scene] of Array.from(scenes.entries())) {
+    if (!scene.levelInfo.length && !scene.staticData.length) scenes.delete(key);
+  }
+  return scenes;
+}
+
+function appendSkillDataLine(scene: SkillDataScene, block: SkillDataSceneBlock, line: string): void {
+  if (block === 'level info') {
+    const values = tokenValues(stripLineComment(line));
+    if (values.length) scene.levelInfo.push(values);
+  } else if (block === 'static data') {
+    const values = tokenValues(stripLineComment(line));
+    if (values.length) scene.staticData.push(...values);
+  } else if (block === 'level property') {
+    scene.levelProperty.push(stripLineComment(line).trim());
+  }
+}
+
+type SkillDataSceneBlock = 'level info' | 'static data' | 'level property';
+
+function normalizeLevelInfoRows(rawRows: string[][]): string[][] {
+  if (!rawRows.length) return [];
+  const first = rawRows[0];
+  const colCount = Number(first[0]);
+  if (!Number.isInteger(colCount) || colCount <= 0) return rawRows;
+  const packedValues = [...first.slice(1), ...rawRows.slice(1).flat()];
+  const rows: string[][] = [];
+  for (let i = 0; i < packedValues.length; i += colCount) {
+    rows.push(packedValues.slice(i, i + colCount));
+  }
+  return rows;
+}
+
+function parseSkillPropertyRefs(lines: string[]): SkillDataLabelRef[] {
+  const refs: SkillDataLabelRef[] = [];
+  const fallbackLabels: string[] = [];
+  let pendingText = '';
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const text = extractSkillPropertyText(line);
+    if (text) {
+      pendingText = text;
+      fallbackLabels.splice(0, fallbackLabels.length, ...splitSkillPropertyLabels(text));
+    }
+
+    const numbers = numericTokens(line);
+    if (numbers.length < 3) continue;
+    const slot = refsForSkillPropertyLine(numbers, pendingText, fallbackLabels, refs);
+    refs.push(...slot);
+  }
+
+  return refs;
+}
+
+function refsForSkillPropertyLine(
+  numbers: number[],
+  propertyText: string,
+  fallbackLabels: string[],
+  existing: SkillDataLabelRef[],
+): SkillDataLabelRef[] {
+  const out: SkillDataLabelRef[] = [];
+  const groups = Math.floor(numbers.length / 3);
+  for (let group = 0; group < groups; group++) {
+    const source = numbers[group * 3];
+    const index = numbers[group * 3 + 1];
+    const scale = numbers[group * 3 + 2];
+    if (!Number.isInteger(index) || index < 0) continue;
+    const labelBase = fallbackLabels[existing.length + out.length] || propertyText || sourceLabel(source) || '';
+    const label = formatSkillDataMeaning(labelBase, source, scale);
+    if (source < 0) {
+      out.push({ kind: 'level', index, label });
+    } else {
+      const staticIndex = Number.isInteger(source) ? source : index;
+      out.push({ kind: 'static', index: staticIndex, label });
+      if (index !== staticIndex) out.push({ kind: 'static', index, label });
+    }
+  }
+  return out;
+}
+
+function mergeSkillDataLabelRefs(base: SkillDataLabelRef[], override: SkillDataLabelRef[]): SkillDataLabelRef[] {
+  const byKey = new Map<string, SkillDataLabelRef>();
+  for (const ref of base) byKey.set(`${ref.kind}:${ref.index}:${ref.label}`, ref);
+  for (const ref of override) byKey.set(`${ref.kind}:${ref.index}:${ref.label}`, ref);
+  return Array.from(byKey.values());
+}
+
+function labelsFromRefs(refs: SkillDataLabelRef[], kind: SkillDataKind): Map<number, string[]> {
+  const labels = new Map<number, string[]>();
+  for (const ref of refs) {
+    if (ref.kind !== kind || !ref.label) continue;
+    const arr = labels.get(ref.index) || [];
+    if (!arr.includes(ref.label)) arr.push(ref.label);
+    labels.set(ref.index, arr);
+  }
+  return labels;
+}
+
+function skillDataLabel(labels: Map<number, string[]>, index: number, fallbackPrefix: string): string {
+  const known = labels.get(index);
+  if (known?.length) return known.join(' / ');
+  return `${fallbackPrefix}#${index}`;
+}
+
+function normalizeSkillDataParameterFile(data: SkillDataParameterFile): SkillDataParameterConfig {
+  const byPath = new Map<string, SkillDataParameterSkill>();
+  const byCode = new Map<number, Array<{ key: string; skill: SkillDataParameterSkill }>>();
+  for (const [rawKey, rawSkill] of Object.entries(data.skills || {})) {
+    if (!rawSkill || typeof rawSkill !== 'object') continue;
+    const key = normalizeSkillParameterKey(rawKey);
+    if (!key) continue;
+    byPath.set(key, rawSkill);
+    byPath.set(`skill/${key}`, rawSkill);
+    for (const code of rawSkill.codes || []) {
+      if (!Number.isSafeInteger(code)) continue;
+      const arr = byCode.get(code) || [];
+      arr.push({ key, skill: rawSkill });
+      byCode.set(code, arr);
+    }
+  }
+  for (const [rawCode, rawKeys] of Object.entries(data.byCode || {})) {
+    const code = Number(rawCode);
+    if (!Number.isSafeInteger(code)) continue;
+    const keys = Array.isArray(rawKeys) ? rawKeys : [rawKeys];
+    for (const rawKey of keys) {
+      if (typeof rawKey !== 'string') continue;
+      const key = normalizeSkillParameterKey(rawKey);
+      const skill = byPath.get(key) || byPath.get(`skill/${key}`);
+      if (!key || !skill) continue;
+      const arr = byCode.get(code) || [];
+      if (!arr.some(item => item.key === key)) arr.push({ key, skill });
+      byCode.set(code, arr);
+    }
+  }
+  return { byPath, byCode };
+}
+
+function normalizeSkillParameterKey(value: string): string {
+  const normalized = normalizeUnpackKey(value);
+  return normalized.startsWith('skill/') ? normalized.slice('skill/'.length) : normalized;
+}
+
+function findSkillDataParameters(
+  config: SkillDataParameterConfig,
+  input: UnpackPreviewInput,
+  metadata: UnpackResolvedMetadata | undefined,
+): SkillDataParameterSkill | undefined {
+  const normalized = normalizeUnpackKey(input.key);
+  const pathCandidates = [
+    normalized,
+    normalizeSkillParameterKey(normalized),
+  ];
+  for (const key of pathCandidates) {
+    const skill = config.byPath.get(key);
+    if (skill) return skill;
+  }
+  if (typeof metadata?.itemCode !== 'number') return undefined;
+  const matches = config.byCode.get(metadata.itemCode) || [];
+  if (!matches.length) return undefined;
+  const basename = path.posix.basename(normalized, path.posix.extname(normalized));
+  return matches.find(match => path.posix.basename(match.key, path.posix.extname(match.key)) === basename)?.skill
+    || (matches.length === 1 ? matches[0].skill : undefined);
+}
+
+function refsFromSkillDataParameters(parameters: SkillDataParameterSkill | undefined, sceneKey: string): SkillDataLabelRef[] {
+  if (!parameters?.scenes) return [];
+  const scene = mergeSkillDataParameterScenes(parameters.scenes.default, parameters.scenes[sceneKey]);
+  if (!scene) return [];
+  return [
+    ...refsFromSkillDataParameterMap(scene.levelInfo, 'level'),
+    ...refsFromSkillDataParameterMap(scene.staticData, 'static'),
+  ];
+}
+
+function mergeSkillDataParameterScenes(
+  base: SkillDataParameterScene | undefined,
+  override: SkillDataParameterScene | undefined,
+): SkillDataParameterScene | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return {
+    levelInfo: { ...(base.levelInfo || {}), ...(override.levelInfo || {}) },
+    staticData: { ...(base.staticData || {}), ...(override.staticData || {}) },
+  };
+}
+
+function refsFromSkillDataParameterMap(
+  labels: Record<string, string | string[] | undefined> | undefined,
+  kind: SkillDataKind,
+): SkillDataLabelRef[] {
+  const refs: SkillDataLabelRef[] = [];
+  for (const [rawIndex, rawLabels] of Object.entries(labels || {})) {
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0) continue;
+    const values = Array.isArray(rawLabels) ? rawLabels : [rawLabels];
+    for (const rawLabel of values) {
+      if (typeof rawLabel !== 'string') continue;
+      const label = rawLabel.trim();
+      if (label) refs.push({ kind, index, label });
+    }
+  }
+  return refs;
+}
+
+function extractSkillPropertyText(line: string): string | undefined {
+  const backtick = line.match(/`([^`]*)`/);
+  if (backtick?.[1]) return backtick[1].trim();
+  const linked = line.match(/<\d+::([^>`]+)(?:`[^`]*)?>/);
+  if (linked?.[1]) return linked[1].trim();
+  return undefined;
+}
+
+function splitSkillPropertyLabels(text: string): string[] {
+  const normalized = text
+    .replace(/<[^>]+>/g, '\u0000')
+    .replace(/%%/g, '%')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized.includes('\u0000')) return [cleanSkillPropertyLabel(normalized)].filter(isString);
+  return normalized
+    .split('\u0000')
+    .map(cleanSkillPropertyLabel)
+    .filter(isString);
+}
+
+function cleanSkillPropertyLabel(value: string): string {
+  return value
+    .replace(/[：:，,、/+\-~()（）\[\]【】<>]+/g, ' ')
+    .replace(/\b(int|float1|float2)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatSkillDataMeaning(labelBase: string, source: number, scale: number): string {
+  const parts = [labelBase || sourceLabel(source) || ''];
+  const scaleText = scaleMeaning(scale);
+  if (scaleText) parts.push(scaleText);
+  return parts.filter(Boolean).join(' ');
+}
+
+function sourceLabel(source: number): string | undefined {
+  return SKILL_DAMAGE_SOURCE_LABELS[source];
+}
+
+function scaleMeaning(scale: number): string | undefined {
+  if (!Number.isFinite(scale)) return undefined;
+  if (Math.abs(scale - 1) < 0.000001) return undefined;
+  if (Math.abs(scale - 0.1) < 0.000001) return 'x0.1';
+  if (Math.abs(scale - 0.01) < 0.000001) return 'x0.01';
+  if (Math.abs(scale - 0.001) < 0.000001) return 'x0.001';
+  return `x${trimNumber(scale)}`;
+}
+
+function stripLineComment(line: string): string {
+  const idx = line.indexOf('//');
+  return idx >= 0 ? line.slice(0, idx) : line;
+}
+
+function tokenValues(line: string): string[] {
+  return line
+    .split(/\s+/)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .filter(part => /^[-+]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(part));
+}
+
+function numericTokens(line: string): number[] {
+  return tokenValues(line).map(Number).filter(Number.isFinite);
+}
+
 function addTextSection(sections: UnpackPreviewSection[], title: string, lines: string[], tone?: UnpackPreviewSection['tone']): void {
   const cleaned = lines.map(line => line.replace(/\\n/g, '\n').trim()).filter(Boolean);
   if (cleaned.length) sections.push({ title, lines: cleaned.slice(0, 80), ...(tone ? { tone } : {}) });
@@ -1172,70 +1687,41 @@ function dedupeEntries<T extends { code: number; quantity?: number; detail?: str
   return out;
 }
 
-function parseSkillTreeNodes(text: string): SkillTreeNode[] {
+function parseSkillTreeGroups(text: string): ParsedSkillTreeGroup[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const nodes: SkillTreeNode[] = [];
-  let currentJob = '';
-  let currentBranch = '';
+  const groups: ParsedSkillTreeGroup[] = [];
+  let group: ParsedSkillTreeGroup | undefined;
   let inCharacterJob = false;
   let inSkillInfo = false;
   let currentTag = '';
   let node: SkillTreeNode | undefined;
 
-  const flush = () => {
-    if (node && Number.isSafeInteger(node.code)) nodes.push(node);
+  const flushNode = () => {
+    if (group && node && Number.isSafeInteger(node.code) && node.code >= 0) group.nodes.push(node);
     node = undefined;
   };
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('//')) continue;
-    const tag = line.match(/^\[([^\]]+)\]$/);
-    if (tag) {
-      const name = tag[1].trim().toLowerCase();
-      if (name === 'character job') {
-        inCharacterJob = true;
-        currentJob = '';
-        currentBranch = '';
-        currentTag = '';
-        continue;
+  const flushGroup = () => {
+    flushNode();
+    if (group && group.nodes.length) groups.push(group);
+    group = undefined;
+  };
+  const consumeValue = (value: string) => {
+    if (!group) return;
+    const stripped = stripLineComment(value).trim();
+    if (!stripped) return;
+    const cleaned = labelToken(stripped) || cleanValue(stripped) || stripped;
+    if (!inSkillInfo) {
+      if (!group.job && looksLikeSkillTreeToken(cleaned)) {
+        group.job = cleaned;
+        return;
       }
-      if (name === '/character job') {
-        flush();
-        inCharacterJob = false;
-        inSkillInfo = false;
-        currentTag = '';
-        continue;
+      if (!group.branch && group.job && looksLikeSkillTreeToken(cleaned)) {
+        group.branch = cleaned;
       }
-      if (name === 'skill info' || name === 'common skill') {
-        flush();
-        inSkillInfo = true;
-        node = { code: -1, branch: currentBranch, common: name === 'common skill', nextSkills: [] };
-        currentTag = '';
-        continue;
-      }
-      if (name === '/skill info' || name === '/common skill') {
-        flush();
-        inSkillInfo = false;
-        currentTag = '';
-        continue;
-      }
-      currentTag = name;
-      continue;
+      return;
     }
-    if (!inCharacterJob) continue;
-    const cleaned = labelToken(line) || cleanValue(line) || line;
-    if (!currentJob && /^\[?[a-z ]+\]?$/i.test(cleaned)) {
-      currentJob = cleaned;
-      continue;
-    }
-    if (!currentBranch && currentJob && /^\[?[a-z ]+\]?$/i.test(cleaned)) {
-      currentBranch = cleaned;
-      if (node) node.branch = currentBranch;
-      continue;
-    }
-    if (!inSkillInfo || !node) continue;
-    const nums = numbersFromLines([line]);
+    if (!node) return;
+    const nums = numbersFromLines([stripped]);
     if (currentTag === 'index' && nums.length) node.code = nums[0];
     else if (currentTag === 'icon pos' && nums.length >= 2) {
       node.x = nums[0];
@@ -1243,9 +1729,59 @@ function parseSkillTreeNodes(text: string): SkillTreeNode[] {
     } else if (currentTag === 'next skill' && nums.length) {
       node.nextSkills.push(...nums.filter(n => n >= 0));
     }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('//')) continue;
+    const tag = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+    if (tag) {
+      const name = tag[1].trim().toLowerCase();
+      const inline = tag[2]?.trim() || '';
+      if (name === 'character job') {
+        flushGroup();
+        inCharacterJob = true;
+        group = { nodes: [] };
+        inSkillInfo = false;
+        currentTag = '';
+        if (inline) consumeValue(inline);
+        continue;
+      }
+      if (name === '/character job') {
+        flushGroup();
+        inCharacterJob = false;
+        inSkillInfo = false;
+        currentTag = '';
+        continue;
+      }
+      if (!inCharacterJob) continue;
+      if (name === 'skill info' || name === 'common skill') {
+        flushNode();
+        inSkillInfo = true;
+        node = { code: -1, common: name === 'common skill', nextSkills: [] };
+        currentTag = '';
+        if (inline) consumeValue(inline);
+        continue;
+      }
+      if (name === '/skill info' || name === '/common skill') {
+        flushNode();
+        inSkillInfo = false;
+        currentTag = '';
+        continue;
+      }
+      currentTag = name;
+      if (inline) consumeValue(inline);
+      continue;
+    }
+    if (!inCharacterJob) continue;
+    consumeValue(line);
   }
-  flush();
-  return nodes.filter(item => item.code >= 0);
+  flushGroup();
+  return groups;
+}
+
+function looksLikeSkillTreeToken(value: string): boolean {
+  return /^[a-z][a-z0-9 _-]*$/i.test(value.trim());
 }
 
 function firstSkillTreeJob(text: string): string | undefined {

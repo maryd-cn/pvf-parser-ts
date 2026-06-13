@@ -64,6 +64,18 @@ async function readManifest(file: string): Promise<PvfDirectoryManifest | undefi
   }
 }
 
+function findPreviewSkillNode(preview: UnpackHoverPreview | undefined, key: string, code: number | undefined): { fsPath?: string } | undefined {
+  if (!preview?.skillTrees?.length) return undefined;
+  const normalized = key ? normalizeUnpackKey(key) : '';
+  for (const group of preview.skillTrees) {
+    for (const node of group.nodes || []) {
+      if (normalized && node.key && normalizeUnpackKey(node.key) === normalized) return node;
+      if (!normalized && typeof code === 'number' && node.code === code && node.fsPath) return node;
+    }
+  }
+  return undefined;
+}
+
 function nonce(): string {
   let value = '';
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -136,6 +148,21 @@ function previewText(preview: UnpackHoverPreview): string {
       lines.push(line);
       emitted++;
     }
+    for (const table of section.tables || []) {
+      if (emitted >= maxSectionLines) break;
+      if (table.caption) {
+        lines.push(table.caption);
+        emitted++;
+      }
+      if (emitted >= maxSectionLines) break;
+      lines.push((table.headers || []).join(' | '));
+      emitted++;
+      for (const row of (table.rows || []).slice(0, 5)) {
+        if (emitted >= maxSectionLines) break;
+        lines.push(row.join(' | '));
+        emitted++;
+      }
+    }
     for (const entry of section.entries || []) {
       if (emitted >= maxSectionLines) break;
       const name = entry.name || (entry.unresolved ? '未解析' : '');
@@ -151,7 +178,8 @@ function previewText(preview: UnpackHoverPreview): string {
       lines.push(`${prefix}${name}${qty}${details ? `  ${details}` : ''}`);
       emitted++;
     }
-    const total = (section.fields || []).length + (section.lines || []).length + (section.entries || []).length;
+    const total = (section.fields || []).length + (section.lines || []).length + (section.entries || []).length
+      + (section.tables || []).reduce((sum, table) => sum + 2 + Math.min(5, (table.rows || []).length), 0);
     if (total > emitted) lines.push(`... 另有 ${total - emitted} 项未展示`);
   }
   const text = lines.join('\n').replace(/\n{4,}/g, '\n\n\n');
@@ -274,6 +302,10 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       if (!element.isDirectory) await this.openFileWithPreview(element);
       return;
     }
+    if (type === 'openPreviewSkill') {
+      if (!element.isDirectory) await this.openPreviewSkill(element, record);
+      return;
+    }
     if (type === 'copy') {
       await vscode.commands.executeCommand('pvf.copyUnpackPath', element);
       return;
@@ -305,6 +337,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     const requestId = typeof record.requestId === 'string' ? record.requestId : '';
     const location = typeof record.location === 'string' ? record.location : 'inline';
     const usePanel = location === 'editorPanel';
+    const resolvePreviewIcon = usePanel || location === 'inline';
     const showLoading = record.showLoading === true;
     const enabled = configBool('pvf.unpackExplorer.hoverPreview.enabled', true);
     if (!enabled || !element || element.isDirectory) {
@@ -317,7 +350,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       this.activePreviewPanelRequestId = requestId;
       if (showLoading) this.previewPanel.showLoading(element.name, element.key);
     }
-    const preview = await this.preview.resolvePreview(element, { resolveIcon: usePanel }).catch((err: any) => {
+    const preview = await this.preview.resolvePreview(element, { resolveIcon: resolvePreviewIcon }).catch((err: any) => {
       this.output?.appendLine(`[PVF] failed to build hover preview ${element.key}: ${String(err && err.message || err)}`);
       return undefined;
     });
@@ -346,6 +379,22 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       preview: true,
     });
     await this.showPreviewPanelForElement(element, true);
+  }
+
+  private async openPreviewSkill(element: UnpackExplorerEntry, record: Record<string, unknown>): Promise<void> {
+    const key = typeof record.key === 'string' ? normalizeUnpackKey(record.key) : '';
+    const code = typeof record.code === 'number' ? record.code : undefined;
+    if (!key && typeof code !== 'number') return;
+    const preview = await this.preview.resolvePreview(element, { resolveIcon: false }).catch((err: any) => {
+      this.output?.appendLine(`[PVF] failed to resolve inline skill tree click ${element.key}: ${String(err && err.message || err)}`);
+      return undefined;
+    });
+    const node = findPreviewSkillNode(preview, key, code);
+    if (!node?.fsPath) {
+      vscode.window.showWarningMessage('无法跳转：这个技能节点没有解析到对应的 .skl 文件。');
+      return;
+    }
+    await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(node.fsPath));
   }
 
   private async showPreviewPanelForElement(element: UnpackExplorerEntry, preserveFocus: boolean): Promise<void> {
@@ -961,7 +1010,10 @@ body {
   grid-template-columns: repeat(2, minmax(280px, 360px));
 }
 .hover-preview.skill-tree {
-  grid-template-columns: minmax(360px, 420px);
+  grid-template-columns: minmax(420px, min(760px, calc(100vw - 16px)));
+}
+.hover-preview.skill {
+  grid-template-columns: minmax(360px, 620px);
 }
 .hover-preview.skill-tree.split {
   grid-template-columns: repeat(2, minmax(340px, 420px));
@@ -1086,6 +1138,46 @@ body {
   color: #ddd8cc;
   overflow-wrap: anywhere;
 }
+.preview-table-caption {
+  margin: 6px 0 3px;
+  color: #b7b0a4;
+  font-size: 10px;
+}
+.preview-table-wrap {
+  max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #343943;
+  background: rgba(7, 9, 14, .42);
+}
+.preview-table {
+  min-width: 100%;
+  width: max-content;
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.preview-table th,
+.preview-table td {
+  border-right: 1px solid #303641;
+  border-bottom: 1px solid #303641;
+  padding: 2px 6px;
+  white-space: nowrap;
+  text-align: left;
+}
+.preview-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #d9c27a;
+  background: #171b24;
+}
+.preview-table td {
+  color: #d6dfef;
+}
+.preview-table td:first-child {
+  color: #aaa39a;
+}
 .preview-entry {
   display: grid;
   grid-template-columns: 34px 1fr;
@@ -1141,6 +1233,94 @@ body {
 }
 .preview-map-point.unresolved { background: #6a6a6a; box-shadow: none; }
 .preview-map-point.common { background: #d8b657; box-shadow: 0 0 5px rgba(216,182,87,.7); }
+.skill-tree-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 8px;
+}
+.skill-tree-card {
+  min-width: 0;
+  border: 1px solid #4f4b41;
+  background:
+    linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.024) 1px, transparent 1px),
+    #0d0f15;
+  background-size: 36px 36px;
+}
+.skill-tree-title {
+  height: 24px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #38352f;
+  color: #d9c27a;
+  background: rgba(0,0,0,.34);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-tree-canvas {
+  position: relative;
+  height: var(--skill-tree-height, 280px);
+  min-height: 210px;
+  overflow: hidden;
+}
+.skill-tree-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.skill-tree-line {
+  stroke: rgba(132, 147, 168, .44);
+  stroke-width: 1.5;
+}
+.skill-tree-node {
+  position: absolute;
+  left: var(--node-left);
+  top: var(--node-top);
+  width: 34px;
+  height: 34px;
+  padding: 1px;
+  transform: translate(-50%, -50%);
+  border: 1px solid #84735a;
+  background: #111;
+  font: inherit;
+  appearance: none;
+  box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 4px 10px rgba(0,0,0,.45);
+}
+.skill-tree-node.resolved {
+  cursor: pointer;
+}
+.skill-tree-node.common {
+  border-color: #d8b657;
+}
+.skill-tree-node.unresolved {
+  border-color: #575757;
+  background: #1b1b1b;
+  color: #8b8b8b;
+}
+.skill-tree-node:hover {
+  outline: 1px solid #e4c66f;
+  z-index: 2;
+}
+.skill-tree-node img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+.skill-tree-fallback {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: #aaa39a;
+  font-size: 10px;
+  line-height: 1;
+}
 </style>
 </head>
 <body>

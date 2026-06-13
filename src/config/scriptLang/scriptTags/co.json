@@ -62,15 +62,14 @@
     },
     {
       "name": "icon pos",
-      "title": "在技能窗口显示的坐标",
-      "description": "在技能窗口显示的坐标",
-      "authors": "青山工作室"
+      "title": "技能树的坐标",
+      "authors": "青山工作室|Lancarus"
     },
     {
       "name": "index",
-      "title": "对应城镇.twn的区域",
-      "description": "对应城镇.twn的区域：\n\n[area]\n    0-------------对应这个区域\n    `xxxxxxxx.map`\n    `[gate]`\n[/area]\n鸣谢：Cai - 263007544\n-------\n城镇索引，对应Town.lst中的城镇编号。\n\n在技能树里：\n\n[index] - 技能代码\n[icon pos] 技能树的坐标\n｛参考技能树坐标图｝",
-      "authors": "青山工作室"
+      "title": "技能代码",
+      "description": "在技能树里：\n\n[index] - 技能代码\n[icon pos] 技能树的坐标\n｛参考技能树坐标图｝\n-----------\n对应城镇.twn的区域：\n\n[area]\n    0-------------对应这个区域\n    `xxxxxxxx.map`\n    `[gate]`\n[/area]\n鸣谢：Cai - 263007544\n-------\n城镇索引，对应Town.lst中的城镇编号。",
+      "authors": "青山工作室|Lancarus"
     },
     {
       "name": "infighter",
