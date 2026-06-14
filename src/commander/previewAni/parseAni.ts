@@ -6,9 +6,10 @@ export interface ParseResult {
   groups: Map<string, { img: string; frames: FrameSeqEntry[] }>;
 }
 
-export function parseAniText(text: string): ParseResult {
+export function parseAniText(text: string, options: { silent?: boolean } = {}): ParseResult {
   const groups = new Map<string, { img: string; frames: FrameSeqEntry[] }>();
   const framesSeq: FrameSeqEntry[] = [];
+  let lastImagePath = '';
   const blockRegex = /\[FRAME(\d{3})\]([\s\S]*?)(?=\n\[FRAME|$)/gi; let bm: RegExpExecArray | null;
   while ((bm = blockRegex.exec(text)) !== null) {
     const block = bm[2] || '';
@@ -17,18 +18,19 @@ export function parseAniText(text: string): ParseResult {
     let idx = 0;
     const imgHeader = /\[IMAGE\]/i.exec(block);
     if (imgHeader) {
-      const afterImg = block.slice(imgHeader.index + imgHeader[0].length);
-      const lines = afterImg.split(/\r?\n/);
-      let p = 0; while (p < lines.length && lines[p].trim() === '') p++;
-      const pathLine = (lines[p] || '').trim(); p++;
-      while (p < lines.length && lines[p].trim() === '') p++;
-      const idxLine = (lines[p] || '').trim();
-      if (pathLine.length > 0) {
-        if ((pathLine.startsWith('`') && pathLine.endsWith('`')) || (pathLine.startsWith('"') && pathLine.endsWith('"')) || (pathLine.startsWith("'") && pathLine.endsWith("'"))) {
-          img = pathLine.slice(1, -1).trim();
-        } else { img = pathLine.trim(); }
-      } else img = '';
-      const parsed = parseInt(idxLine, 10); if (!Number.isNaN(parsed)) idx = parsed;
+      const imageLines = readTagValueLines(block, imgHeader.index + imgHeader[0].length);
+      const firstLine = (imageLines[0] || '').trim();
+      const secondLine = (imageLines[1] || '').trim();
+      const firstAsIndex = parseStrictInt(firstLine);
+      if (typeof firstAsIndex === 'number') {
+        img = lastImagePath;
+        idx = firstAsIndex;
+      } else {
+        img = cleanQuotedValue(firstLine);
+        const parsed = parseStrictInt(secondLine);
+        if (typeof parsed === 'number') idx = parsed;
+        if (img) lastImagePath = img;
+      }
     }
     const delayM = /\[DELAY\]\s*\r?\n\s*(\d+)/i.exec(block); const delay = delayM ? parseInt(delayM[1], 10) : 50;
     const posM = /\[IMAGE POS\]\s*\r?\n\s*(-?\d+)\s+(-?\d+)/i.exec(block); const pos = posM ? { x: parseInt(posM[1], 10), y: parseInt(posM[2], 10) } : undefined;
@@ -53,6 +55,38 @@ export function parseAniText(text: string): ParseResult {
     groups.get(img)!.frames.push(frame);
     framesSeq.push(frame);
   }
-  if (groups.size === 0) { vscode.window.showWarningMessage('未解析到任何帧，请检查 ANI 格式或文件内容'); }
+  if (groups.size === 0 && !options.silent) { vscode.window.showWarningMessage('未解析到任何帧，请检查 ANI 格式或文件内容'); }
   return { framesSeq, groups };
+}
+
+function readTagValueLines(block: string, valueStart: number): string[] {
+  const afterTag = block.slice(valueStart);
+  const lines = afterTag.split(/\r?\n/);
+  const values: string[] = [];
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      if (values.length === 0) continue;
+      values.push('');
+      continue;
+    }
+    if (/^\[[^\]]+\]/.test(trimmed)) break;
+    values.push(trimmed);
+  }
+  return values.filter(line => line.trim().length > 0);
+}
+
+function cleanQuotedValue(value: string): string {
+  const text = (value || '').trim();
+  if ((text.startsWith('`') && text.endsWith('`')) || (text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function parseStrictInt(value: string): number | undefined {
+  const text = (value || '').trim();
+  if (!/^-?\d+$/.test(text)) return undefined;
+  const parsed = parseInt(text, 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }

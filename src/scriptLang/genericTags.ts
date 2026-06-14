@@ -5,13 +5,13 @@ export const SCRIPT_TAG_SHORTS = [
   'act', 'ai', 'aic', 'ani', 'atk', 'blu', 'bm', 'chr', 'co', 'cre',
   'dgn', 'equ', 'etc', 'evt', 'exj', 'key', 'lay', 'map', 'mm', 'mob',
   'npc', 'obj', 'pos', 'ptl', 'qst', 'rgn', 'sd', 'shp', 'skl',
-  'stk', 'stm', 'tbl', 'twn', 'ui', 'wdm'
+  'stk', 'stm', 'tbl', 'twn', 'ui', 'wdm', 'nut'
 ] as const;
 
 export const GENERIC_SCRIPT_TAG_SHORTS = [
   'atk', 'blu', 'bm', 'chr', 'co', 'cre', 'dgn', 'etc', 'evt', 'exj',
   'lay', 'map', 'mm', 'mob', 'npc', 'obj', 'pos', 'ptl', 'qst',
-  'rgn', 'sd', 'shp', 'stk', 'stm', 'tbl', 'twn', 'ui', 'wdm'
+  'rgn', 'sd', 'shp', 'stk', 'stm', 'tbl', 'twn', 'ui', 'wdm', 'nut'
 ] as const;
 
 export type ScriptTagShort = typeof SCRIPT_TAG_SHORTS[number];
@@ -27,7 +27,6 @@ export const SHORT_BY_LANGUAGE_ID: Record<string, string> = Object.fromEntries(
 export function scriptTagLanguageIdForPath(filePath: string): string | undefined {
   const lower = filePath.toLowerCase();
   if (lower.endsWith('.ani.als') || lower.endsWith('.als')) return 'pvf-ani';
-  if (lower.endsWith('.nut')) return 'squirrel';
   const short = SCRIPT_TAG_SHORTS.find(item => lower.endsWith(`.${item}`));
   return short ? scriptTagLanguageId(short) : undefined;
 }

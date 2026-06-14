@@ -259,6 +259,20 @@
       "title": "效果类型",
       "officialDescription": "#### 官方示例: animation.ani\n\n```pvf\n// 例如) NONE 类型的情况下，仅使用 alpha 值。\n[SPECTRUM EFFECT] `LINEARDODGE` // 效果类型\n\t\t\t\t// `NONE`\t : 原样复制角色形象。\n\t\t\t\t// `DODGE`\n\t\t\t\t// `LINEARDODGE`\n\t\t\t\t// `DARK`\n\t\t\t\t// `XOR`\n\t\t\t\t// `MONOCHROME`\n\t\t\t\t// 其他功能会出错\n```",
       "officialAuthors": "官方PVF"
+    },
+    {
+      "name": "use animation",
+      "title": "将ani文件作为",
+      "closing": false,
+      "authors": "lostluna1|Lancarus",
+      "description": "use as，将第一行的.ani文件作为第二行的名称使用，可以是数字"
+    },
+    {
+      "name": "add",
+      "title": "添加动画",
+      "closing": false,
+      "authors": "lostluna1|Lancarus",
+      "description": "- 第1行的第1个数字代表时间，帧\n- 第1行的第2个数字代表图层\n- 第二行是上面定义的动画"
     }
   ]
 }

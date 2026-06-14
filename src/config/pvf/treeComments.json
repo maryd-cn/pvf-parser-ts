@@ -4274,6 +4274,9 @@
       "comments": {
         "equipment/character/swordman/avatar": {
           "comment": "时装"
+        },
+        "etc/equipmentpartset.etc": {
+          "comment": "套装列表"
         }
       }
     }

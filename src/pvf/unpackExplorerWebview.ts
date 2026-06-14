@@ -112,6 +112,16 @@ function skillKindLabel(kind: UnpackResolvedMetadata['skillKind']): string {
   return '';
 }
 
+function resourceRoleLabel(role: string): string {
+  if (role === 'script') return 'NUT脚本';
+  if (role === 'action') return '动作';
+  if (role === 'avatar') return '时装/角色';
+  if (role === 'skillEffect') return '技能特效';
+  if (role === 'attack') return '攻击信息';
+  if (role === 'object') return '对象';
+  return '资源';
+}
+
 function previewText(preview: UnpackHoverPreview): string {
   const lines: string[] = [];
   lines.push(preview.title || preview.key);
@@ -169,10 +179,12 @@ function previewText(preview: UnpackHoverPreview): string {
       const prefix = typeof entry.code === 'number' ? `${entry.code}  ` : '';
       const qty = typeof entry.quantity === 'number' ? ` x${entry.quantity}` : '';
       const details = [
+        entry.resourceRole ? resourceRoleLabel(entry.resourceRole) : (entry.resourceKind ? String(entry.resourceKind).toUpperCase() : undefined),
         entry.branch,
         typeof entry.x === 'number' && typeof entry.y === 'number' ? `坐标 ${entry.x}, ${entry.y}` : undefined,
         entry.common ? '通用' : undefined,
         entry.key,
+        entry.fsPath,
         entry.detail,
       ].filter((part): part is string => !!part).join('  ');
       lines.push(`${prefix}${name}${qty}${details ? `  ${details}` : ''}`);
@@ -306,6 +318,10 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       if (!element.isDirectory) await this.openPreviewSkill(element, record);
       return;
     }
+    if (type === 'openPreviewLine') {
+      if (!element.isDirectory) await this.openPreviewLine(element, record);
+      return;
+    }
     if (type === 'copy') {
       await vscode.commands.executeCommand('pvf.copyUnpackPath', element);
       return;
@@ -338,6 +354,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     const location = typeof record.location === 'string' ? record.location : 'inline';
     const usePanel = location === 'editorPanel';
     const resolvePreviewIcon = usePanel || location === 'inline';
+    const renderRichPreview = usePanel;
     const showLoading = record.showLoading === true;
     const enabled = configBool('pvf.unpackExplorer.hoverPreview.enabled', true);
     if (!enabled || !element || element.isDirectory) {
@@ -350,7 +367,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
       this.activePreviewPanelRequestId = requestId;
       if (showLoading) this.previewPanel.showLoading(element.name, element.key);
     }
-    const preview = await this.preview.resolvePreview(element, { resolveIcon: resolvePreviewIcon }).catch((err: any) => {
+    const preview = await this.preview.resolvePreview(element, { resolveIcon: resolvePreviewIcon, renderRich: renderRichPreview }).catch((err: any) => {
       this.output?.appendLine(`[PVF] failed to build hover preview ${element.key}: ${String(err && err.message || err)}`);
       return undefined;
     });
@@ -397,12 +414,30 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
     await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(node.fsPath));
   }
 
+  private async openPreviewLine(element: UnpackExplorerEntry, record: Record<string, unknown>): Promise<void> {
+    const line = typeof record.line === 'number' ? Math.floor(record.line) : -1;
+    const character = typeof record.character === 'number' ? Math.floor(record.character) : 0;
+    if (!Number.isInteger(line) || line < 0) return;
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(element.fsPath));
+      const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
+      const boundedLine = Math.max(0, Math.min(line, document.lineCount - 1));
+      const lineText = document.lineAt(boundedLine).text;
+      const boundedCharacter = Math.max(0, Math.min(character, lineText.length));
+      const position = new vscode.Position(boundedLine, boundedCharacter);
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch (err: any) {
+      vscode.window.showWarningMessage(`无法跳转到行 ${line + 1}: ${String(err && err.message || err)}`);
+    }
+  }
+
   private async showPreviewPanelForElement(element: UnpackExplorerEntry, preserveFocus: boolean): Promise<void> {
     this.activePreviewElement = element;
     this.activeEditorPreviewPath = path.resolve(element.fsPath);
     this.activePreviewPanelRequestId = '';
     this.previewPanel.showLoading(element.name, element.key, preserveFocus);
-    const preview = await this.preview.resolvePreview(element, { resolveIcon: true }).catch((err: any) => {
+    const preview = await this.preview.resolvePreview(element, { resolveIcon: true, renderRich: true }).catch((err: any) => {
       this.output?.appendLine(`[PVF] failed to build unpack preview panel ${element.key}: ${String(err && err.message || err)}`);
       return undefined;
     });
@@ -416,7 +451,7 @@ export class UnpackExplorerWebviewProvider implements vscode.WebviewViewProvider
   private canPreviewElement(element: UnpackExplorerEntry): boolean {
     if (element.isDirectory) return false;
     const key = normalizeUnpackKey(element.key || element.name).toLowerCase();
-    if (key.endsWith('.equ') || key.endsWith('.stk') || key.endsWith('.shp') || key.endsWith('.qst') || key.endsWith('.skl')) return true;
+    if (key.endsWith('.ani') || key.endsWith('.equ') || key.endsWith('.stk') || key.endsWith('.shp') || key.endsWith('.qst') || key.endsWith('.skl')) return true;
     if (/^clientonly\/skilltree\/.+_(sp|tp)\.co$/i.test(key)) return true;
     if (/^clientonly\/skillshoptree(sp|tp)index\.co$/i.test(key)) return true;
     if (/^etc\/pvpskilltree\/.+\.etc$/i.test(key)) return true;
@@ -1177,6 +1212,18 @@ body {
 }
 .preview-table td:first-child {
   color: #aaa39a;
+}
+.preview-table-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.preview-table-link:hover {
+  color: #d9c27a;
+  text-decoration: underline;
 }
 .preview-entry {
   display: grid;

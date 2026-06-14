@@ -7,16 +7,20 @@ import { getSpriteRgba } from '../../npk/imgReader.js';
 import { PvfModel } from '../../pvf/model';
 import { ParsedAls, AlsAddRef } from './parseAls';
 
-export async function buildTimelineFromFrames(context: vscode.ExtensionContext, root: string, framesSeq: FrameSeqEntry[], out?: vscode.OutputChannel): Promise<{ timeline: TimelineFrame[], albumMap: Map<string, any> }>{
+export async function buildTimelineFromFrames(context: vscode.ExtensionContext, root: string, framesSeq: FrameSeqEntry[], out?: vscode.OutputChannel, options: { resolveEmptyImage?: (frame: FrameSeqEntry) => string | undefined; skipImageScan?: boolean } = {}): Promise<{ timeline: TimelineFrame[], albumMap: Map<string, any> }>{
   const albumMap = new Map<string, any>();
-  const uniqueImgs = Array.from(new Set(framesSeq.map(f => (f.img || '').trim()).filter(s => s.length > 0)));
+  const frameImageKey = (frame: FrameSeqEntry) => (frame.img || '').trim() || options.resolveEmptyImage?.(frame)?.trim() || '';
+  const uniqueImgs = Array.from(new Set(framesSeq.map(frameImageKey).filter(s => s.length > 0)));
   // load albums
   const total = uniqueImgs.length || 1; let done = 0;
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '查找并加载 IMG 资源…' }, async (p) => {
-    for (const img of uniqueImgs) { const al = await loadAlbumForImage(context, root, img, out); if (al) albumMap.set(img, al); done++; p.report({ increment: (done/total)*100, message: `${done}/${total}` }); }
+    for (const img of uniqueImgs) { const al = await loadAlbumForImage(context, root, img, out, { skipScan: options.skipImageScan }); if (al) albumMap.set(img, al); done++; p.report({ increment: (done/total)*100, message: `${done}/${total}` }); }
   });
-  if (uniqueImgs.length > 0 && albumMap.size === 0) { vscode.window.showWarningMessage('未找到任何 IMG 资源，仅显示坐标/碰撞盒。'); }
-  return buildTimelineFromSequence(framesSeq, albumMap);
+  if (uniqueImgs.length > 0 && albumMap.size === 0) {
+    if (options.skipImageScan) out?.appendLine('未找到任何 IMG 资源，仅显示坐标/碰撞盒。');
+    else vscode.window.showWarningMessage('未找到任何 IMG 资源，仅显示坐标/碰撞盒。');
+  }
+  return buildTimelineFromSequence(framesSeq, albumMap, options);
 }
 
 export async function buildTimelineFromPvfFrames(context: vscode.ExtensionContext, model: PvfModel, root: string, framesSeq: FrameSeqEntry[], out?: vscode.OutputChannel): Promise<{ timeline: TimelineFrame[], albumMap: Map<string, any> }>{
@@ -96,11 +100,11 @@ export async function buildTimelineFromPvfFrames(context: vscode.ExtensionContex
   return buildTimelineFromSequence(extendedFrames, albumMap);
 }
 
-function buildTimelineFromSequence(framesSeq: FrameSeqEntry[], albumMap: Map<string, any>): { timeline: TimelineFrame[], albumMap: Map<string, any> } {
+function buildTimelineFromSequence(framesSeq: FrameSeqEntry[], albumMap: Map<string, any>, options: { resolveEmptyImage?: (frame: FrameSeqEntry) => string | undefined } = {}): { timeline: TimelineFrame[], albumMap: Map<string, any> } {
   const timeline: TimelineFrame[] = [];
   const TRANSPARENT_1X1 = 'AAAAAA==';
   for (const f of framesSeq) {
-    const imgKey = (f.img || '').trim();
+    const imgKey = (f.img || '').trim() || options.resolveEmptyImage?.(f)?.trim() || '';
     const al = imgKey ? albumMap.get(imgKey) : undefined;
     if (al) {
       const rgba = getSpriteRgba(al, f.idx);
@@ -122,7 +126,7 @@ function buildTimelineFromSequence(framesSeq: FrameSeqEntry[], albumMap: Map<str
  */
 // 现在 relLayer 表示基于主 ani 的层级 (0=与主层同平面; >0 在主层之上; <0 在主层之下)
 // order 表示 startFrame (可以为负数提前播放)
-export async function buildCompositeTimeline(context: vscode.ExtensionContext, root: string, mainFrames: FrameSeqEntry[], alsParsed: ParsedAls | null, layerAniMap: Map<string, { frames: FrameSeqEntry[]; relLayer: number; order: number; id: string; source: string }>, out?: vscode.OutputChannel) : Promise<{ timeline: any[], albumMap: Map<string, any> }> {
+export async function buildCompositeTimeline(context: vscode.ExtensionContext, root: string, mainFrames: FrameSeqEntry[], alsParsed: ParsedAls | null, layerAniMap: Map<string, { frames: FrameSeqEntry[]; relLayer: number; order: number; id: string; source: string }>, out?: vscode.OutputChannel, options: { skipImageScan?: boolean } = {}) : Promise<{ timeline: any[], albumMap: Map<string, any> }> {
   // 收集所有帧引用的 IMG
   const collectImgs = (frames: FrameSeqEntry[]) => frames.map(f=> (f.img||'').trim()).filter(s=> s.length>0 && !s.toLowerCase().endsWith('.ani'));
   let allImgs: string[] = collectImgs(mainFrames);
@@ -131,9 +135,12 @@ export async function buildCompositeTimeline(context: vscode.ExtensionContext, r
   const albumMap = new Map<string, any>();
   const total = uniqueImgs.length || 1; let done = 0;
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '加载所有图层 IMG 资源…' }, async (p) => {
-    for (const img of uniqueImgs) { const al = await loadAlbumForImage(context, root, img, out); if (al) albumMap.set(img, al); done++; p.report({ increment: (done/total)*100, message: `${done}/${total}` }); }
+    for (const img of uniqueImgs) { const al = await loadAlbumForImage(context, root, img, out, { skipScan: options.skipImageScan }); if (al) albumMap.set(img, al); done++; p.report({ increment: (done/total)*100, message: `${done}/${total}` }); }
   });
-  if (uniqueImgs.length > 0 && albumMap.size === 0) { vscode.window.showWarningMessage('未找到任何 IMG 资源，仅显示坐标/碰撞盒'); }
+  if (uniqueImgs.length > 0 && albumMap.size === 0) {
+    if (options.skipImageScan) out?.appendLine('未找到任何 IMG 资源，仅显示坐标/碰撞盒');
+    else vscode.window.showWarningMessage('未找到任何 IMG 资源，仅显示坐标/碰撞盒');
+  }
 
   const TRANSPARENT_1X1 = 'AAAAAA==';
   const makeLayerFrame = (f: FrameSeqEntry): any => {

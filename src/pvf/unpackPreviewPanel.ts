@@ -18,10 +18,14 @@ export class UnpackHoverPreviewPanel {
     const panel = this.ensurePanel(preserveFocus);
     this.currentPreview = preview;
     panel.title = preview.title ? `预览: ${preview.title}` : '解包预览';
-    panel.webview.html = this.html(panel.webview, renderPreview(preview));
+    const aniScriptUri = this.aniPreviewScriptUri(panel.webview);
+    const body = preview.kind === 'ani' && preview.ani?.timeline?.length
+      ? renderAniPreview(preview, aniScriptUri)
+      : renderPreview(preview, aniScriptUri);
+    panel.webview.html = this.html(panel.webview, body);
   }
 
-  clear(message = '将鼠标悬停到解包目录中的装备、道具、商店、任务、技能或技能树文件。'): void {
+  clear(message = '将鼠标悬停到解包目录中的 ANI、装备、道具、商店、任务、技能或技能树文件。'): void {
     if (!this.panel) return;
     this.currentPreview = undefined;
     this.panel.webview.html = this.html(this.panel.webview, `<div class="preview-frame"><div class="preview-loading">${escapeHtml(message)}</div></div>`);
@@ -57,6 +61,15 @@ export class UnpackHoverPreviewPanel {
         const key = typeof (message as any).key === 'string' ? (message as any).key : '';
         const code = typeof (message as any).code === 'number' ? (message as any).code : undefined;
         void this.openCurrentPreviewSkill(key, code);
+        return;
+      }
+      if ((message as any).type === 'openResource' && typeof (message as any).fsPath === 'string') {
+        void this.openResource((message as any).fsPath);
+        return;
+      }
+      if ((message as any).type === 'openLine' && typeof (message as any).line === 'number') {
+        const character = typeof (message as any).character === 'number' ? (message as any).character : 0;
+        void this.openCurrentPreviewLine((message as any).line, character);
       }
     });
     panel.onDidDispose(() => {
@@ -100,6 +113,37 @@ export class UnpackHoverPreviewPanel {
     }
   }
 
+  private async openResource(fsPath: string): Promise<void> {
+    if (!fsPath) return;
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+      await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
+    } catch (err: any) {
+      vscode.window.showWarningMessage(`无法打开资源文件: ${String(err && err.message || err)}`);
+    }
+  }
+
+  private async openCurrentPreviewLine(line: number, character: number): Promise<void> {
+    const preview = this.currentPreview;
+    if (!preview?.fsPath || !Number.isInteger(line) || line < 0) return;
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(preview.fsPath));
+      const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
+      const boundedLine = Math.max(0, Math.min(line, document.lineCount - 1));
+      const lineText = document.lineAt(boundedLine).text;
+      const boundedCharacter = Math.max(0, Math.min(Math.floor(character || 0), lineText.length));
+      const position = new vscode.Position(boundedLine, boundedCharacter);
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    } catch (err: any) {
+      vscode.window.showWarningMessage(`无法跳转到行 ${line + 1}: ${String(err && err.message || err)}`);
+    }
+  }
+
+  private aniPreviewScriptUri(webview: vscode.Webview): string {
+    return webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'webview', 'aniPreview.js')).toString();
+  }
+
   private html(webview: vscode.Webview, body: string): string {
     const csp = `default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-inline';`;
     return `<!DOCTYPE html>
@@ -129,6 +173,31 @@ body {
 .preview-stage {
   min-height: 100vh;
   padding: 12px 14px;
+}
+.ani-preview-shell {
+  height: calc(100vh - 24px);
+  min-height: 360px;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border, #333);
+}
+.ani-preview-shell #root {
+  width: 100%;
+  height: 100%;
+}
+.skill-animation {
+  margin: 8px 0 4px;
+}
+.skill-animation-canvas {
+  height: 320px;
+  min-height: 260px;
+  overflow: hidden;
+  border: 1px solid #343943;
+  background: var(--vscode-editor-background);
+}
+.skill-animation-canvas #root {
+  width: 100%;
+  height: 100%;
 }
 .hover-preview {
   display: grid;
@@ -337,6 +406,18 @@ body {
 .preview-table td:first-child {
   color: #aaa39a;
 }
+.preview-table-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.preview-table-link:hover {
+  color: #d9c27a;
+  text-decoration: underline;
+}
 .preview-entry {
   display: grid;
   grid-template-columns: 34px 1fr;
@@ -357,6 +438,18 @@ body {
 .preview-entry-name {
   color: #e8e0d0;
   overflow-wrap: anywhere;
+}
+.preview-entry-name.clickable {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.preview-entry-name.clickable:hover {
+  color: #d9c27a;
+  text-decoration: underline;
 }
 .preview-entry-detail {
   color: #8f8f8f;
@@ -495,7 +588,7 @@ body {
 <body>
 <main class="preview-stage">${body}</main>
 <script>
-const vscode = acquireVsCodeApi();
+const vscode = window.__PVF_VSCODE_API || (window.__PVF_VSCODE_API = acquireVsCodeApi());
 document.addEventListener('click', event => {
   const skillTarget = event.target && event.target.closest ? event.target.closest('[data-skill-key]') : null;
   if (skillTarget) {
@@ -505,6 +598,22 @@ document.addEventListener('click', event => {
       type: 'openSkill',
       key: skillTarget.getAttribute('data-skill-key') || '',
       code: Number.isFinite(rawCode) ? rawCode : undefined,
+    });
+    return;
+  }
+  const resourceTarget = event.target && event.target.closest ? event.target.closest('[data-resource-path]') : null;
+  if (resourceTarget) {
+    event.preventDefault();
+    vscode.postMessage({ type: 'openResource', fsPath: resourceTarget.getAttribute('data-resource-path') || '' });
+    return;
+  }
+  const lineTarget = event.target && event.target.closest ? event.target.closest('[data-source-line]') : null;
+  if (lineTarget) {
+    event.preventDefault();
+    vscode.postMessage({
+      type: 'openLine',
+      line: Number(lineTarget.getAttribute('data-source-line') || '0'),
+      character: Number(lineTarget.getAttribute('data-source-character') || '0'),
     });
     return;
   }
@@ -523,16 +632,30 @@ function loadingMarkup(title: string, key: string): string {
   return `<div class="hover-preview"><div class="preview-frame"><div class="preview-loading">载入预览...</div><div class="preview-path">${escapeHtml(title)}${key ? `<br>${escapeHtml(key)}` : ''}</div></div></div>`;
 }
 
-function renderPreview(preview: UnpackHoverPreview): string {
+function renderPreview(preview: UnpackHoverPreview, aniScriptUri: string): string {
   const classes = [
     'hover-preview',
     preview.kind === 'skill' ? 'skill' : '',
     preview.kind === 'skillTree' ? 'skill-tree' : '',
   ].filter(Boolean).join(' ');
-  return `<div class="${classes}">${renderFrame(preview, preview.sections || [], true)}</div>`;
+  return `<div class="${classes}">${renderFrame(preview, preview.sections || [], true, aniScriptUri)}</div>`;
 }
 
-function renderFrame(preview: UnpackHoverPreview, sections: UnpackPreviewSection[], primary: boolean): string {
+function renderAniPreview(preview: UnpackHoverPreview, scriptUri: string): string {
+  const initPayload = {
+    timeline: preview.ani?.timeline || [],
+    layers: preview.ani?.layers || [],
+    uses: preview.ani?.uses || [],
+    state: preview.ani?.state || { axes: true, atk: true, dmg: true, als: true, sync: false, bg: 'dark', speed: 1, zoom: 1 },
+  };
+  return `<div class="ani-preview-shell" title="${escapeAttr(preview.key || preview.title || '')}">
+<div id="root"></div>
+<script>window.__ANI_INIT=${jsonScript(initPayload)};</script>
+<script src="${escapeAttr(scriptUri)}"></script>
+</div>`;
+}
+
+function renderFrame(preview: UnpackHoverPreview, sections: UnpackPreviewSection[], primary: boolean, aniScriptUri = ''): string {
   const chunks: string[] = ['<div class="preview-frame">'];
   if (primary) {
     chunks.push(renderHeader(preview));
@@ -545,6 +668,10 @@ function renderFrame(preview: UnpackHoverPreview, sections: UnpackPreviewSection
     }
     if (preview.skillTrees?.length) {
       chunks.push(renderSkillTrees(preview.skillTrees));
+    }
+    if (preview.skillAnimation?.timeline?.length) {
+      chunks.push(renderSkillAnimation(preview, aniScriptUri));
+      chunks.push('<div class="preview-sep"></div>');
     }
   }
   for (const section of sections) chunks.push(renderSection(section));
@@ -601,8 +728,14 @@ function renderTable(table: NonNullable<UnpackPreviewSection['tables']>[number])
       : `<div class="preview-table-caption">${escapeHtml(table.caption)}</div>`
     : '';
   const headers = `<tr>${(table.headers || []).map(value => `<th>${escapeHtml(value || '')}</th>`).join('')}</tr>`;
-  const rows = (table.rows || []).map(row => `<tr>${row.map(value => `<td>${escapeHtml(value || '')}</td>`).join('')}</tr>`).join('');
+  const rows = (table.rows || []).map((row, rowIndex) => `<tr>${row.map((value, cellIndex) => `<td>${renderTableCell(value, cellIndex === 0 ? table.rowTargets?.[rowIndex] : undefined)}</td>`).join('')}</tr>`).join('');
   return `${caption}<div class="preview-table-wrap"><table class="preview-table"><thead>${headers}</thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderTableCell(value: string, target: { line: number; character?: number } | undefined): string {
+  if (!target || !Number.isInteger(target.line)) return escapeHtml(value || '');
+  const character = Number.isInteger(target.character) ? target.character || 0 : 0;
+  return `<button type="button" class="preview-table-link" data-source-line="${target.line}" data-source-character="${character}" title="跳转到第 ${target.line + 1} 行">${escapeHtml(value || '')}</button>`;
 }
 
 function renderEntry(entry: NonNullable<UnpackPreviewSection['entries']>[number]): string {
@@ -610,7 +743,11 @@ function renderEntry(entry: NonNullable<UnpackPreviewSection['entries']>[number]
   const prefix = typeof entry.code === 'number' ? `${entry.code}  ` : '';
   const qty = typeof entry.quantity === 'number' ? ` x${entry.quantity}` : '';
   const name = `${prefix}${entry.name || (entry.unresolved ? '未解析' : '')}${qty}`;
+  const nameNode = entry.fsPath
+    ? `<button type="button" class="preview-entry-name clickable" data-resource-path="${escapeAttr(entry.fsPath)}">${escapeHtml(name)}</button>`
+    : `<div class="preview-entry-name">${escapeHtml(name)}</div>`;
   const details = [
+    entry.resourceRole ? resourceRoleLabel(entry.resourceRole) : (entry.resourceKind ? String(entry.resourceKind).toUpperCase() : ''),
     entry.branch,
     typeof entry.x === 'number' && typeof entry.y === 'number' ? `坐标 ${entry.x}, ${entry.y}` : '',
     entry.common ? '通用' : '',
@@ -620,10 +757,41 @@ function renderEntry(entry: NonNullable<UnpackPreviewSection['entries']>[number]
   return `<div class="preview-entry">
 <div class="preview-entry-icon">${icon}</div>
 <div>
-<div class="preview-entry-name">${escapeHtml(name)}</div>
+${nameNode}
 ${details ? `<div class="preview-entry-detail">${escapeHtml(details)}</div>` : ''}
 </div>
 </div>`;
+}
+
+function renderSkillAnimation(preview: UnpackHoverPreview, scriptUri: string): string {
+  const animation = preview.skillAnimation;
+  if (!animation?.timeline?.length || !scriptUri) return '';
+  const initPayload = {
+    timeline: animation.timeline,
+    layers: animation.layers || [],
+    uses: animation.uses || [],
+    state: { axes: true, atk: true, dmg: true, als: true, sync: false, bg: 'dark', speed: 1, zoom: 1 },
+  };
+  const source = animation.source;
+  const sourceButton = source?.fsPath
+    ? `<button type="button" class="preview-table-caption clickable" data-resource-path="${escapeAttr(source.fsPath)}">动画: ${escapeHtml(source.key || source.name || '')}</button>`
+    : `<div class="preview-table-caption">动画预览</div>`;
+  return `<section class="skill-animation">
+${sourceButton}
+<div class="skill-animation-canvas"><div id="root"></div></div>
+<script>window.__ANI_INIT=${jsonScript(initPayload)};</script>
+<script src="${escapeAttr(scriptUri)}"></script>
+</section>`;
+}
+
+function resourceRoleLabel(role: string): string {
+  if (role === 'script') return 'NUT脚本';
+  if (role === 'action') return '动作';
+  if (role === 'avatar') return '时装/角色';
+  if (role === 'skillEffect') return '技能特效';
+  if (role === 'attack') return '攻击信息';
+  if (role === 'object') return '对象';
+  return '资源';
 }
 
 function renderMiniMap(preview: UnpackHoverPreview): string {
@@ -762,6 +930,13 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function jsonScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 function findSkillTreeNode(preview: UnpackHoverPreview | undefined, key: string, code: number | undefined): UnpackPreviewSkillTreeNode | undefined {

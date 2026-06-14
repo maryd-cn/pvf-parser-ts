@@ -1,6 +1,11 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type * as vscode from 'vscode';
+import * as vscode from 'vscode';
+import { buildCompositeTimeline, buildTimelineFromFrames, expandAlsLayers } from '../commander/previewAni/buildTimeline';
+import { loadAlbumForImage } from '../commander/previewAni/npkResolver';
+import { parseAniText } from '../commander/previewAni/parseAni';
+import { parseAlsText } from '../commander/previewAni/parseAls';
+import type { FrameSeqEntry, TimelineFrame } from '../commander/previewAni/types';
 import {
   UnpackMetadataService,
   UnpackResolvedMetadata,
@@ -18,6 +23,7 @@ export type UnpackPreviewKind =
   | 'quest'
   | 'skill'
   | 'skillTree'
+  | 'ani'
   | 'error';
 
 export interface UnpackPreviewIcon {
@@ -38,6 +44,10 @@ export interface UnpackPreviewEntry {
   code?: number;
   name?: string;
   key?: string;
+  fsPath?: string;
+  resourceKind?: 'nut' | 'act' | 'ani' | 'als' | 'atk' | 'obj' | 'img' | 'other';
+  resourceRole?: 'script' | 'action' | 'avatar' | 'skillEffect' | 'attack' | 'object' | 'other';
+  resourceOrder?: number;
   quantity?: number;
   detail?: string;
   x?: number;
@@ -53,6 +63,7 @@ export interface UnpackPreviewTable {
   headers: string[];
   rows: string[][];
   tagName?: string;
+  rowTargets?: Array<{ line: number; character?: number } | undefined>;
 }
 
 export interface UnpackPreviewSection {
@@ -98,6 +109,25 @@ export interface UnpackPreviewSkillTreeGroup {
   nodes: UnpackPreviewSkillTreeNode[];
 }
 
+export interface UnpackPreviewAniData {
+  timeline: TimelineFrame[];
+  layers: Array<{ id: string; relLayer: number; order: number; kind?: string; seq?: number }>;
+  uses: Array<{ id: string; path: string }>;
+  state: { axes: boolean; atk: boolean; dmg: boolean; als: boolean; sync: boolean; bg: string; speed: number; zoom: number };
+  frameCount: number;
+  imageCount: number;
+  missingImageCount: number;
+}
+
+export interface UnpackPreviewSkillAnimation {
+  timeline: TimelineFrame[];
+  source?: UnpackPreviewEntry;
+  candidates: UnpackPreviewEntry[];
+  layers?: Array<{ id: string; relLayer: number; order: number; kind?: string; seq?: number }>;
+  uses?: Array<{ id: string; path: string }>;
+  missingImageCount?: number;
+}
+
 export interface UnpackHoverPreview {
   kind: UnpackPreviewKind;
   title: string;
@@ -112,6 +142,8 @@ export interface UnpackHoverPreview {
   sections: UnpackPreviewSection[];
   miniMap?: UnpackPreviewMiniMap;
   skillTrees?: UnpackPreviewSkillTreeGroup[];
+  ani?: UnpackPreviewAniData;
+  skillAnimation?: UnpackPreviewSkillAnimation;
   message?: string;
   text?: string;
 }
@@ -127,12 +159,14 @@ export interface UnpackPreviewInput {
 
 export interface UnpackPreviewOptions {
   resolveIcon?: boolean;
+  renderRich?: boolean;
 }
 
 interface CacheEntry {
   mtimeMs: number;
   size: number;
   iconSettled: boolean;
+  renderSettled: boolean;
   preview: UnpackHoverPreview | undefined;
 }
 
@@ -170,6 +204,7 @@ interface SkillDataParameterSkill {
   references?: {
     nut?: string[];
     ani?: string[];
+    img?: string[];
   };
 }
 
@@ -232,6 +267,10 @@ const SKILL_LISTS_BY_JOB: Record<string, string[]> = {
   common: ['skill/skilllist.lst', 'skill/skill.lst'],
 };
 const COMMON_SKILL_LSTS = ['skill/skilllist.lst', 'skill/skill.lst'];
+const PASSIVEOBJECT_LST = 'passiveobject/passiveobject.lst';
+const TRANSPARENT_1X1 = 'AAAAAA==';
+const LINKED_RESOURCE_TRACE_MAX_DEPTH = 2;
+const LINKED_RESOURCE_TRACE_MAX_ENTRIES = 48;
 
 const BLOCK_VALUE_TAGS = new Set([
   'a condition item',
@@ -474,6 +513,7 @@ export class UnpackPreviewService {
   async resolvePreview(input: UnpackPreviewInput, options: UnpackPreviewOptions = {}): Promise<UnpackHoverPreview | undefined> {
     if (input.isDirectory || !input.key) return undefined;
     const shouldResolveIcon = options.resolveIcon === true;
+    const shouldResolveRichRender = options.renderRich === true;
     const kind = this.previewKind(input.key, '');
     if (!kind && !shouldProbePreviewText(input.key)) return undefined;
     try {
@@ -481,7 +521,7 @@ export class UnpackPreviewService {
       if (!stat.isFile()) return undefined;
       const cacheKey = `${path.resolve(input.root)}\0${normalizeUnpackKey(input.key)}\0${input.version}`;
       const cached = this.cache.get(cacheKey);
-      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && (!shouldResolveIcon || cached.iconSettled)) {
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && (!shouldResolveIcon || cached.iconSettled) && (!shouldResolveRichRender || cached.renderSettled)) {
         return cached.preview;
       }
 
@@ -501,7 +541,13 @@ export class UnpackPreviewService {
       }
       const preview = await this.buildPreview(input, text, resolvedKind, latestMetadata, options);
       latestMetadata = this.metadata.getCached(input) || latestMetadata;
-      this.cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, iconSettled: previewIconSettled(latestMetadata, shouldResolveIcon), preview });
+      this.cache.set(cacheKey, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        iconSettled: previewIconSettled(latestMetadata, shouldResolveIcon),
+        renderSettled: previewRenderSettled(preview, shouldResolveRichRender),
+        preview,
+      });
       return preview;
     } catch (err: any) {
       return this.errorPreview(input, String(err && err.message || err));
@@ -510,6 +556,7 @@ export class UnpackPreviewService {
 
   private previewKind(key: string, text: string): UnpackPreviewKind | undefined {
     const normalized = normalizeUnpackKey(key);
+    if (normalized.endsWith('.ani')) return 'ani';
     if (normalized.endsWith('.equ')) {
       return hasSetTags(text) ? 'equipmentSet' : 'equipment';
     }
@@ -535,8 +582,9 @@ export class UnpackPreviewService {
       case 'stackable': return this.buildStackablePreview(input, tags, metadata);
       case 'shop': return this.buildShopPreview(input, tags, metadata);
       case 'quest': return this.buildQuestPreview(input, tags, metadata);
-      case 'skill': return this.buildSkillPreview(input, text, tags, metadata);
+      case 'skill': return this.buildSkillPreview(input, text, tags, metadata, options);
       case 'skillTree': return this.buildSkillTreePreview(input, text, tags, metadata, options);
+      case 'ani': return this.buildAniPreview(input, text, options);
       default: return this.errorPreview(input, '不支持的预览类型');
     }
   }
@@ -695,6 +743,7 @@ export class UnpackPreviewService {
     text: string,
     tags: ParsedTags,
     metadata: UnpackResolvedMetadata | undefined,
+    options: UnpackPreviewOptions = {},
   ): Promise<UnpackHoverPreview> {
     const sections: UnpackPreviewSection[] = [];
     const titles = await this.loadTagTitles('skl');
@@ -721,7 +770,15 @@ export class UnpackPreviewService {
     const dataTables = buildSkillDataTables(text, dataParameters);
     if (dataTables.length) sections.push({ title: '动态/静态数据', tables: dataTables, tone: 'blue' });
     addTextSection(sections, '特殊效果', tagLines(tags, 'skill under cooltime effect', 'skill under cooltime effect each'), 'blue');
-    return this.basePreview(input, metadata, 'skill', displayTitle(input, tags, metadata), '技能', sections);
+    const preview = this.basePreview(input, metadata, 'skill', displayTitle(input, tags, metadata), '技能', sections);
+    const related = await this.resolveSkillRelatedResources(input, options, {
+      includeAnimation: isActiveSkill(tags),
+      parameters: dataParameters,
+      tags,
+    });
+    for (const section of skillResourceSections(related.entries)) sections.push(section);
+    if (related.animation) preview.skillAnimation = related.animation;
+    return preview;
   }
 
   private async buildSkillTreePreview(
@@ -779,6 +836,478 @@ export class UnpackPreviewService {
       skillTrees,
       ...(nodes.length ? {} : { message: '没有解析到可绘制的技能树节点。' }),
     };
+  }
+
+  private async buildAniPreview(input: UnpackPreviewInput, text: string, options: UnpackPreviewOptions = {}): Promise<UnpackHoverPreview> {
+    const parsed = parseAniText(text, { silent: true });
+    const framesSeq = parsed.framesSeq;
+    const uniqueImages = Array.from(new Set(framesSeq.map(frame => (frame.img || '').trim()).filter(Boolean)));
+    const root = await this.resolveNpkRoot();
+    let timeline: TimelineFrame[] = [];
+    let loadedImageCount = 0;
+    if (framesSeq.length && root && options.renderRich === true) {
+      try {
+        const emptyImageResolver = await this.emptyAniImageResolver(root, input.key, framesSeq);
+        const built = await buildTimelineFromFrames(this.context, root, framesSeq, this.output as vscode.OutputChannel | undefined, { resolveEmptyImage: emptyImageResolver });
+        timeline = built.timeline;
+        loadedImageCount = built.albumMap.size;
+      } catch (err: any) {
+        this.output?.appendLine(`[PVF] failed to build ANI timeline ${input.key}: ${String(err && err.message || err)}`);
+        timeline = fallbackTimeline(framesSeq);
+      }
+    }
+    if (!timeline.length && framesSeq.length) timeline = fallbackTimeline(framesSeq);
+    const missingImageCount = Math.max(0, uniqueImages.length - loadedImageCount);
+    const sections: UnpackPreviewSection[] = [{
+      title: '动画信息',
+      fields: compactFields([
+        field('帧数', numText(framesSeq.length)),
+        field('图片引用', numText(uniqueImages.length)),
+        field('已加载图片', numText(loadedImageCount)),
+        missingImageCount ? field('未解析图片', numText(missingImageCount), 'warning') : undefined,
+        root ? field('NPK 根目录', root) : field('NPK 根目录', '未配置，当前仅显示透明帧/坐标盒', 'warning'),
+      ]),
+      ...(uniqueImages.length ? { lines: uniqueImages.slice(0, 10) } : {}),
+    }];
+    return {
+      kind: 'ani',
+      title: input.name || path.basename(input.fsPath),
+      subtitle: 'ANI 动画',
+      key: input.key,
+      fsPath: input.fsPath,
+      sections,
+      badges: ['Canvas 预览'],
+      ani: {
+        timeline,
+        layers: [],
+        uses: [],
+        state: { axes: true, atk: true, dmg: true, als: true, sync: false, bg: 'dark', speed: 1, zoom: 1 },
+        frameCount: framesSeq.length,
+        imageCount: uniqueImages.length,
+        missingImageCount,
+      },
+      ...(!framesSeq.length ? { message: '未解析到任何 [FRAME###] 帧。' } : {}),
+    };
+  }
+
+  private async resolveNpkRoot(): Promise<string> {
+    const configured = (vscode.workspace.getConfiguration().get<string>('pvf.npkRoot') || '').trim();
+    if (configured) return configured;
+    try {
+      const { readConfiguredNpkRoots } = await import('./unpackEnv.js');
+      const roots = await readConfiguredNpkRoots(this.context);
+      return roots[0] || '';
+    } catch {
+      return '';
+    }
+  }
+
+  private async emptyAniImageResolver(root: string, aniKey: string, framesSeq: FrameSeqEntry[], options: { skipImageScan?: boolean } = {}): Promise<((frame: FrameSeqEntry) => string | undefined) | undefined> {
+    if (!root || !framesSeq.some(frame => !(frame.img || '').trim())) return undefined;
+    const candidates = emptyImageCandidatesForAni(aniKey);
+    if (!candidates.length) return undefined;
+    for (const candidate of candidates) {
+      try {
+        const album = await loadAlbumForImage(this.context, root, candidate, this.output as vscode.OutputChannel | undefined, { skipScan: options.skipImageScan });
+        if (album?.sprites?.length) {
+          return () => candidate;
+        }
+      } catch {
+      }
+    }
+    return undefined;
+  }
+
+  private async resolveSkillRelatedResources(
+    input: UnpackPreviewInput,
+    options: UnpackPreviewOptions = {},
+    resourceOptions: { includeAnimation?: boolean; parameters?: SkillDataParameterSkill; tags?: ParsedTags } = {},
+  ): Promise<{ entries: UnpackPreviewEntry[]; animation?: UnpackPreviewSkillAnimation }> {
+    const skill = skillPathInfo(input.key);
+    if (!skill) return { entries: [] };
+    const entries: UnpackPreviewEntry[] = [];
+    const seen = new Set<string>();
+    const push = (entry: UnpackPreviewEntry | undefined) => {
+      if (!entry) return;
+      const key = previewEntryIdentity(entry);
+      if (seen.has(key)) return;
+      seen.add(key);
+      entries.push(entry);
+    };
+    for (const file of await this.findSkillParameterReferenceFiles(input, resourceOptions.parameters, 'nut')) push(file);
+    for (const file of await this.findSkillParameterReferenceFiles(input, resourceOptions.parameters, 'ani')) push(file);
+    for (const file of await this.findSkillParameterReferenceFiles(input, resourceOptions.parameters, 'img')) push(file);
+    for (const file of await this.findSkillNutFiles(input, skill)) push(file);
+    for (const file of await this.findSkillActFiles(input, skill)) push(file);
+    for (const file of await this.findSkillObjFiles(input, skill)) push(file);
+    for (const file of await this.findSkillAtkFiles(input, skill)) push(file);
+    for (const file of this.skillPreloadingImageEntries(skill, resourceOptions.tags)) push(file);
+    const linkedEntries = await this.resolveLinkedResourceEntries(input, entries, resourceOptions.includeAnimation === true);
+    for (const file of linkedEntries) push(file);
+    const declaredAniEntries = entries.filter(entry => entry.resourceKind === 'ani' && typeof entry.resourceOrder === 'number');
+    const aniEntries = resourceOptions.includeAnimation === true
+      ? sortAnimationPreviewEntries(dedupePreviewEntries(declaredAniEntries.length
+        ? declaredAniEntries
+        : [
+          ...entries.filter(entry => entry.resourceKind === 'ani'),
+          ...await this.findSkillAniFiles(input, skill),
+        ]))
+      : [];
+    for (const file of aniEntries) push(file);
+
+    const animation = await this.buildSkillAnimationPreview(input, aniEntries, options);
+    return { entries, ...(animation ? { animation } : {}) };
+  }
+
+  private async resolveLinkedResourceEntries(
+    input: UnpackPreviewInput,
+    sources: UnpackPreviewEntry[],
+    includeAnimation: boolean,
+  ): Promise<UnpackPreviewEntry[]> {
+    const out: UnpackPreviewEntry[] = [];
+    const outSeen = new Set<string>();
+    const scanned = new Set<string>();
+    const queue: Array<{ entry: UnpackPreviewEntry; depth: number }> = [];
+    for (const source of sources) {
+      if (source.fsPath) outSeen.add(canonicalFsPathKey(source.fsPath));
+      if (canTraceLinkedResources(source)) queue.push({ entry: source, depth: 0 });
+    }
+
+    for (let cursor = 0; cursor < queue.length && out.length < LINKED_RESOURCE_TRACE_MAX_ENTRIES; cursor++) {
+      const { entry: source, depth } = queue[cursor];
+      if (!source.fsPath || !canTraceLinkedResources(source)) continue;
+      const sourceKey = canonicalFsPathKey(source.fsPath);
+      if (scanned.has(sourceKey)) continue;
+      scanned.add(sourceKey);
+      let text = '';
+      try {
+        text = await readUtf8Text(source.fsPath);
+      } catch {
+        continue;
+      }
+      const baseDir = path.dirname(source.fsPath);
+      let refOrder = 0;
+      for (const ref of extractArchiveResourceRefs(text)) {
+        const kind = resourceKindFromKey(ref);
+        if (!kind || (kind === 'ani' && !includeAnimation)) continue;
+        const resolved = await resolveReferencedArchiveFile(input.root, baseDir, ref);
+        if (!resolved) continue;
+        const resolvedKey = canonicalFsPathKey(resolved);
+        const key = normalizeTreeRelative(input.root, resolved);
+        const role = resourceRoleFromKey(key, kind);
+        const resourceOrder = source.resourceKind === 'obj' && typeof source.resourceOrder === 'number'
+          ? (source.resourceOrder || 0) * 100 + refOrder
+          : undefined;
+        refOrder++;
+        const entry: UnpackPreviewEntry = {
+          name: path.basename(resolved),
+          key,
+          fsPath: resolved,
+          resourceKind: kind,
+          resourceRole: role,
+          ...(typeof resourceOrder === 'number' ? { resourceOrder } : {}),
+          detail: `${resourceLabel(kind, role)} / ${source.name || path.basename(source.fsPath)}`,
+        };
+        if (!outSeen.has(resolvedKey)) {
+          outSeen.add(resolvedKey);
+          out.push(entry);
+          if (out.length >= LINKED_RESOURCE_TRACE_MAX_ENTRIES) break;
+        }
+        if (depth + 1 < LINKED_RESOURCE_TRACE_MAX_DEPTH && canTraceLinkedResources(entry) && !scanned.has(resolvedKey)) {
+          queue.push({ entry, depth: depth + 1 });
+        }
+        if (kind === 'ani' && includeAnimation) {
+          const alsEntry = await sidecarAlsEntry(input.root, resolved, entry, typeof resourceOrder === 'number' ? resourceOrder + 0.1 : undefined);
+          if (alsEntry?.fsPath) {
+            const alsKey = canonicalFsPathKey(alsEntry.fsPath);
+            if (!outSeen.has(alsKey)) {
+              outSeen.add(alsKey);
+              out.push(alsEntry);
+              if (depth + 1 < LINKED_RESOURCE_TRACE_MAX_DEPTH && canTraceLinkedResources(alsEntry) && !scanned.has(alsKey)) {
+                queue.push({ entry: alsEntry, depth: depth + 1 });
+              }
+              if (out.length >= LINKED_RESOURCE_TRACE_MAX_ENTRIES) break;
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  private async buildSkillAnimationPreview(
+    input: UnpackPreviewInput,
+    aniEntries: UnpackPreviewEntry[],
+    options: UnpackPreviewOptions,
+  ): Promise<UnpackPreviewSkillAnimation | undefined> {
+    if (!aniEntries.length || options.renderRich !== true) return undefined;
+    const sortedAniEntries = await this.sortAnimationPreviewEntriesForRender(aniEntries);
+    let source: UnpackPreviewEntry | undefined;
+    let text = '';
+    let parsed: ReturnType<typeof parseAniText> | undefined;
+    for (const candidate of sortedAniEntries) {
+      if (!candidate.fsPath) continue;
+      try {
+        text = await readUtf8Text(candidate.fsPath);
+      } catch {
+        continue;
+      }
+      const parsedCandidate = parseAniText(text, { silent: true });
+      if (!parsedCandidate.framesSeq.length) continue;
+      source = candidate;
+      parsed = parsedCandidate;
+      break;
+    }
+    if (!source?.fsPath || !parsed) return undefined;
+    const root = await this.resolveNpkRoot();
+    let timeline: TimelineFrame[] = [];
+    let layers: NonNullable<UnpackPreviewSkillAnimation['layers']> = [];
+    let uses: NonNullable<UnpackPreviewSkillAnimation['uses']> = [];
+    let missingImageCount = 0;
+    if (root) {
+      try {
+        const emptyImageResolver = await this.emptyAniImageResolver(root, source.key || '', parsed.framesSeq, { skipImageScan: true });
+        const framesForTimeline = framesWithResolvedEmptyImages(parsed.framesSeq, emptyImageResolver);
+        const als = await loadSidecarAls(source.fsPath);
+        const parsedAls = als ? parseAlsText(als.text, this.output as vscode.OutputChannel | undefined) : undefined;
+        let built: { timeline: TimelineFrame[]; albumMap: Map<string, any> } | undefined;
+        if (parsedAls?.adds.length) {
+          try {
+            const layerMap = await expandAlsLayers(false, this.context, undefined, root, path.dirname(source.fsPath), parsedAls, this.output as vscode.OutputChannel | undefined);
+            if (layerMap.size) {
+              for (const layer of layerMap.values()) {
+                const layerKey = animationSourceKeyForEmptyResolver(input.root, path.dirname(source.fsPath), layer.source);
+                const layerResolver = await this.emptyAniImageResolver(root, layerKey, layer.frames, { skipImageScan: true });
+                layer.frames = framesWithResolvedEmptyImages(layer.frames, layerResolver);
+              }
+              built = await buildCompositeTimeline(this.context, root, framesForTimeline, parsedAls, layerMap, this.output as vscode.OutputChannel | undefined, { skipImageScan: true });
+              layers = parsedAls.adds.map((add, seq) => ({ id: add.id, relLayer: add.relLayer, order: add.order, ...(add.kind ? { kind: add.kind } : {}), seq }));
+              uses = Array.from(parsedAls.uses.values()).map(use => ({ id: use.id, path: use.path }));
+            }
+          } catch (err: any) {
+            this.output?.appendLine(`[PVF] failed to build skill ALS timeline ${input.key} -> ${source.key}: ${String(err && err.message || err)}`);
+          }
+        }
+        if (!built) {
+          built = await buildTimelineFromFrames(this.context, root, parsed.framesSeq, this.output as vscode.OutputChannel | undefined, { resolveEmptyImage: emptyImageResolver, skipImageScan: true });
+        }
+        timeline = built.timeline;
+        const uniqueImages = new Set(parsed.framesSeq.map(frame => (frame.img || '').trim()).filter(Boolean));
+        missingImageCount = Math.max(0, uniqueImages.size - built.albumMap.size);
+      } catch (err: any) {
+        this.output?.appendLine(`[PVF] failed to build skill ANI timeline ${input.key} -> ${source.key}: ${String(err && err.message || err)}`);
+        timeline = fallbackTimeline(parsed.framesSeq);
+      }
+    }
+    if (!timeline.length) timeline = fallbackTimeline(parsed.framesSeq);
+    return {
+      timeline,
+      source,
+      candidates: sortedAniEntries.slice(0, 24),
+      layers,
+      uses,
+      missingImageCount,
+    };
+  }
+
+  private async sortAnimationPreviewEntriesForRender(entries: UnpackPreviewEntry[]): Promise<UnpackPreviewEntry[]> {
+    const scored: Array<{ entry: UnpackPreviewEntry; score: number }> = [];
+    for (const entry of sortAnimationPreviewEntries(entries)) {
+      let score = animationPreviewEntryScore(entry);
+      if (entry.fsPath) {
+        try {
+          const text = await readUtf8Text(entry.fsPath);
+          score -= aniTextImagePathRatio(text) * 30;
+        } catch {
+        }
+      }
+      scored.push({ entry, score });
+    }
+    return scored.sort((a, b) => orderedResourceCompare(a.entry, b.entry)
+      || a.score - b.score
+      || String(a.entry.key || a.entry.name || '').localeCompare(String(b.entry.key || b.entry.name || ''), 'en', { sensitivity: 'base' }))
+      .map(item => item.entry);
+  }
+
+  private async findSkillNutFiles(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const dirs = [
+      ...skill.jobResource.sqrJobs.map(job => safeJoinArchivePath(input.root, `sqr/character/${job}`)),
+      safeJoinArchivePath(input.root, `sqr/skill/${skill.job}`),
+    ].filter(isString);
+    const suffixes = ['.nut'];
+    return this.findRelatedFilesInDirs(input, skill, dirs, suffixes, 'nut', 16);
+  }
+
+  private async findSkillParameterReferenceFiles(
+    input: UnpackPreviewInput,
+    parameters: SkillDataParameterSkill | undefined,
+    kind: 'nut' | 'ani' | 'img',
+  ): Promise<UnpackPreviewEntry[]> {
+    const refs = parameters?.references?.[kind] || [];
+    if (!refs.length) return [];
+    const out: UnpackPreviewEntry[] = [];
+    const seen = new Set<string>();
+    for (const ref of refs) {
+      const resolved = await resolveWorkspaceOrArchiveReference(input.root, ref);
+      if (!resolved) continue;
+      const key = canonicalFsPathKey(resolved);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const treeKey = isPathInsideRoot(input.root, resolved) ? normalizeTreeRelative(input.root, resolved) : normalizeUnpackKey(path.relative(process.cwd(), resolved));
+      const resourceKind = kind as UnpackPreviewEntry['resourceKind'];
+      const role = resourceRoleFromKey(treeKey, resourceKind);
+      out.push({
+        name: path.basename(resolved),
+        key: treeKey,
+        fsPath: resolved,
+        resourceKind,
+        resourceRole: role,
+        detail: `${resourceLabel(resourceKind, role)} / 参数注释`,
+      });
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
+  private async findSkillActFiles(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const passiveJobs = skillPassiveObjectJobs(skill);
+    const dirs = [
+      safeJoinArchivePath(input.root, `character/${skill.jobResource.character}/action`),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/character/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/actionobject/${job}`)),
+    ].filter(isString);
+    return this.findRelatedFilesInDirs(input, skill, dirs, ['.act'], 'act', 16);
+  }
+
+  private async findSkillObjFiles(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const passiveJobs = skillPassiveObjectJobs(skill);
+    const listed = await this.findPassiveObjectListEntries(input, skill);
+    if (listed.length) return listed.slice(0, 16);
+    const dirs = [
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/character/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/actionobject/${job}`)),
+    ].filter(isString);
+    return sortRelatedEntries(dedupePreviewEntries([
+      ...await this.findRelatedFilesInDirs(input, skill, dirs, ['.obj'], 'obj', 16),
+    ]), skill).slice(0, 16);
+  }
+
+  private async findPassiveObjectListEntries(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const lstPath = safeJoinArchivePath(input.root, PASSIVEOBJECT_LST);
+    if (!lstPath) return [];
+    const lst = await this.loadLst(lstPath);
+    if (!lst?.fileToCode.size) return [];
+    const passiveJobs = new Set(skillPassiveObjectJobs(skill).map(job => job.toLowerCase()));
+    const out: UnpackPreviewEntry[] = [];
+    for (const [key, code] of lst.fileToCode) {
+      if (!key.endsWith('.obj')) continue;
+      const match = /^passiveobject\/(?:character|actionobject)\/([^/]+)\/(.+\.obj)$/i.exec(key)
+        || /^passiveobject\/([^/]+)\/(.+\.obj)$/i.exec(key);
+      if (!match || !passiveJobs.has(match[1].toLowerCase())) continue;
+      const stem = path.basename(match[2], '.obj').toLowerCase().replace(/\.\[pvp\]$/i, '');
+      if (!isExactSkillResourceStem(stem, skill.resourceNames)) continue;
+      const fsPath = safeJoinArchivePath(input.root, key);
+      if (!fsPath) continue;
+      const role = resourceRoleFromKey(key, 'obj');
+      out.push({
+        code,
+        name: path.basename(fsPath),
+        key,
+        fsPath,
+        resourceKind: 'obj',
+        resourceRole: role,
+        resourceOrder: relatedEntryScore({ name: path.basename(fsPath), key, resourceKind: 'obj', resourceRole: role }, skill),
+        detail: `${resourceLabel('obj', role)} / ${PASSIVEOBJECT_LST}`,
+      });
+    }
+    return sortRelatedEntries(out, skill).slice(0, 16).map((entry, index) => ({ ...entry, resourceOrder: index }));
+  }
+
+  private async findSkillAtkFiles(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const c = skill.jobResource.character;
+    const passiveJobs = skillPassiveObjectJobs(skill);
+    const dirs = [
+      safeJoinArchivePath(input.root, `character/${c}/attackinfo`),
+      safeJoinArchivePath(input.root, `character/${c}/dsattackinfo`),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/${job}/attackinfo`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/character/${job}/attackinfo`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/actionobject/${job}/attackinfo`)),
+    ].filter(isString);
+    return this.findRelatedFilesInDirs(input, skill, dirs, ['.atk'], 'atk', 16);
+  }
+
+  private async findSkillAniFiles(input: UnpackPreviewInput, skill: SkillPathInfo): Promise<UnpackPreviewEntry[]> {
+    const c = skill.jobResource.character;
+    const passiveJobs = skillPassiveObjectJobs(skill);
+    const dirs = [
+      ...skill.jobResource.animationDirs.map(dir => safeJoinArchivePath(input.root, `character/${c}/${dir}`)),
+      safeJoinArchivePath(input.root, `character/${c}/effect/animation`),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/character/${job}`)),
+      ...passiveJobs.map(job => safeJoinArchivePath(input.root, `passiveobject/actionobject/${job}`)),
+      safeJoinArchivePath(input.root, 'etc/ultimateskillani'),
+    ].filter(isString);
+    return this.findRelatedFilesInDirs(input, skill, dirs, ['.ani'], 'ani', 24);
+  }
+
+  private skillPreloadingImageEntries(skill: SkillPathInfo, tags: ParsedTags | undefined): UnpackPreviewEntry[] {
+    if (!tags) return [];
+    const refs = tagLines(tags, 'skill preloading image')
+      .map(cleanValue)
+      .filter(isString)
+      .filter(value => /\.img$/i.test(value));
+    const out: UnpackPreviewEntry[] = [];
+    const seen = new Set<string>();
+    for (const ref of refs) {
+      const key = normalizeUnpackKey(ref);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const role = resourceRoleFromKey(key, 'img');
+      out.push({
+        name: path.basename(key),
+        key,
+        resourceKind: 'img',
+        resourceRole: role,
+        detail: `${resourceLabel('img', role)} / 预加载`,
+      });
+      if (out.length >= 16) break;
+    }
+    return sortRelatedEntries(out, skill);
+  }
+
+  private async findRelatedFilesInDirs(
+    input: UnpackPreviewInput,
+    skill: SkillPathInfo,
+    dirs: string[],
+    suffixes: string[],
+    resourceKind: UnpackPreviewEntry['resourceKind'],
+    limit: number,
+  ): Promise<UnpackPreviewEntry[]> {
+    const out: UnpackPreviewEntry[] = [];
+    const seen = new Set<string>();
+    for (const dir of dirs) {
+      const files = await findFilesBySkillName(dir, skill.resourceNames, suffixes, Math.max(limit * 2, 24));
+      for (const fsPath of files) {
+        const resolved = path.resolve(fsPath);
+        const seenKey = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
+        const key = normalizeTreeRelative(input.root, resolved);
+        const role = resourceRoleFromKey(key, resourceKind);
+        out.push({
+          name: path.basename(resolved),
+          key,
+          fsPath: resolved,
+          resourceKind,
+          resourceRole: role,
+          detail: resourceLabel(resourceKind, role),
+        });
+        if (out.length >= limit) return sortRelatedEntries(out, skill);
+      }
+    }
+    return sortRelatedEntries(out, skill);
   }
 
   private basePreview(
@@ -972,6 +1501,485 @@ async function readUtf8Text(filePath: string): Promise<string> {
   return text;
 }
 
+async function loadSidecarAls(aniFsPath: string): Promise<{ fsPath: string; text: string } | undefined> {
+  const fsPath = `${aniFsPath}.als`;
+  try {
+    const stat = await fs.stat(fsPath);
+    if (!stat.isFile()) return undefined;
+    return { fsPath, text: await readUtf8Text(fsPath) };
+  } catch {
+    return undefined;
+  }
+}
+
+async function sidecarAlsEntry(root: string, aniFsPath: string, aniEntry: UnpackPreviewEntry, resourceOrder?: number): Promise<UnpackPreviewEntry | undefined> {
+  const loaded = await loadSidecarAls(aniFsPath);
+  if (!loaded) return undefined;
+  const key = normalizeTreeRelative(root, loaded.fsPath);
+  const role = resourceRoleFromKey(key, 'als');
+  return {
+    name: path.basename(loaded.fsPath),
+    key,
+    fsPath: loaded.fsPath,
+    resourceKind: 'als',
+    resourceRole: role,
+    ...(typeof resourceOrder === 'number' ? { resourceOrder } : {}),
+    detail: `${resourceLabel('als', role)} / ${aniEntry.name || path.basename(aniFsPath)}`,
+  };
+}
+
+function fallbackTimeline(framesSeq: FrameSeqEntry[]): TimelineFrame[] {
+  return framesSeq.map(frame => ({
+    rgba: TRANSPARENT_1X1,
+    w: 1,
+    h: 1,
+    delay: frame.delay,
+    dx: frame.pos?.x || 0,
+    dy: frame.pos?.y || 0,
+    ox: 0,
+    oy: 0,
+    fid: frame.idx,
+    ...(frame.gfx ? { gfx: frame.gfx } : {}),
+    ...(typeof frame.scale?.x === 'number' ? { sx: frame.scale.x } : {}),
+    ...(typeof frame.scale?.y === 'number' ? { sy: frame.scale.y } : {}),
+    ...(typeof frame.rotate === 'number' ? { rot: frame.rotate } : {}),
+    ...(frame.tint ? { tint: frame.tint } : {}),
+    atk: frame.atk || [],
+    dmg: frame.dmg || [],
+  }));
+}
+
+function framesWithResolvedEmptyImages(framesSeq: FrameSeqEntry[], resolveEmptyImage: ((frame: FrameSeqEntry) => string | undefined) | undefined): FrameSeqEntry[] {
+  if (!resolveEmptyImage || !framesSeq.some(frame => !(frame.img || '').trim())) return framesSeq;
+  return framesSeq.map(frame => {
+    if ((frame.img || '').trim()) return frame;
+    const img = resolveEmptyImage(frame);
+    return img ? { ...frame, img } : frame;
+  });
+}
+
+function animationSourceKeyForEmptyResolver(root: string, baseDir: string, source: string): string {
+  const cleaned = cleanValue(source) || source;
+  if (!cleaned) return '';
+  if (path.isAbsolute(cleaned) && isPathInsideRoot(root, cleaned)) return normalizeTreeRelative(root, cleaned);
+  const normalized = normalizeUnpackKey(cleaned);
+  if (isArchiveRootReference(normalized)) return normalized;
+  const fsPath = path.resolve(baseDir, ...normalized.split('/'));
+  return isPathInsideRoot(root, fsPath) ? normalizeTreeRelative(root, fsPath) : normalized;
+}
+
+function isArchiveRootReference(key: string): boolean {
+  return /^(?:character|passiveobject|sqr|skill|monster|creature|etc|map|ui|item|equipment|stackable)\//i.test(normalizeUnpackKey(key));
+}
+
+interface SkillPathInfo {
+  job: string;
+  baseName: string;
+  resourceNames: string[];
+  jobResource: SkillJobResource;
+}
+
+interface SkillJobResource {
+  character: string;
+  animationDirs: string[];
+  sqrJobs: string[];
+}
+
+const SKILL_JOB_RESOURCES: Record<string, SkillJobResource> = {
+  swordman: { character: 'swordman', animationDirs: ['animation', 'dsanimation'], sqrJobs: ['swordman'] },
+  demonicswordman: { character: 'swordman', animationDirs: ['dsanimation', 'animation'], sqrJobs: ['demonicswordman', 'swordman'] },
+  fighter: { character: 'fighter', animationDirs: ['animation'], sqrJobs: ['fighter'] },
+  atfighter: { character: 'fighter', animationDirs: ['atanimation', 'animation'], sqrJobs: ['atfighter', 'fighter'] },
+  gunner: { character: 'gunner', animationDirs: ['animation'], sqrJobs: ['gunner'] },
+  atgunner: { character: 'gunner', animationDirs: ['atanimation', 'animation'], sqrJobs: ['atgunner', 'gunner'] },
+  mage: { character: 'mage', animationDirs: ['animation'], sqrJobs: ['mage'] },
+  atmage: { character: 'mage', animationDirs: ['atanimation', 'animation'], sqrJobs: ['atmage', 'mage'] },
+  creatormage: { character: 'mage', animationDirs: ['creatoranimation', 'animation'], sqrJobs: ['creatormage', 'mage'] },
+  priest: { character: 'priest', animationDirs: ['animation'], sqrJobs: ['priest', 'new_priest'] },
+  thief: { character: 'thief', animationDirs: ['animation'], sqrJobs: ['thief'] },
+};
+
+function skillPathInfo(key: string): SkillPathInfo | undefined {
+  const normalized = normalizeUnpackKey(key);
+  const match = /^skill\/([^/]+)\/(.+)\.skl$/i.exec(normalized);
+  if (!match) return undefined;
+  const job = match[1].toLowerCase();
+  const baseName = path.basename(match[2]).toLowerCase();
+  const fallback: SkillJobResource = { character: job, animationDirs: ['animation'], sqrJobs: [job] };
+  return { job, baseName, resourceNames: skillResourceNames(job, baseName), jobResource: SKILL_JOB_RESOURCES[job] || fallback };
+}
+
+function skillResourceNames(job: string, baseName: string): string[] {
+  const names: string[] = [];
+  const add = (value: string | undefined) => {
+    const normalized = (value || '').toLowerCase().trim();
+    if (normalized && !names.includes(normalized)) names.push(normalized);
+  };
+  add(baseName);
+  const bloodBlast = /^bloodblast(.*)$/i.exec(baseName);
+  if ((job === 'swordman' || job === 'demonicswordman') && bloodBlast) {
+    add(`blastblood${bloodBlast[1] || ''}`);
+  }
+  return names;
+}
+
+function isExactSkillResourceStem(stem: string, baseNames: string[]): boolean {
+  const normalizedStem = stem.replace(/\.\[pvp\]$/i, '');
+  return baseNames.some(baseName => normalizedStem === baseName);
+}
+
+function skillPassiveObjectJobs(skill: SkillPathInfo): string[] {
+  const jobs = [skill.job, skill.jobResource.character];
+  return jobs.filter((job, idx) => !!job && jobs.indexOf(job) === idx);
+}
+
+async function findFilesBySkillName(dir: string, baseNames: string[], suffixes: string[], limit: number): Promise<string[]> {
+  const out: string[] = [];
+  const relatedNames = baseNames.map(name => name.toLowerCase()).filter(isString);
+  const suffixSet = new Set(suffixes.map(item => item.toLowerCase()));
+  const queue: string[] = [dir];
+  const seenDirs = new Set<string>();
+  while (queue.length && out.length < limit) {
+    const current = queue.shift()!;
+    const resolvedDir = path.resolve(current);
+    const dirKey = process.platform === 'win32' ? resolvedDir.toLowerCase() : resolvedDir;
+    if (seenDirs.has(dirKey)) continue;
+    seenDirs.add(dirKey);
+    let dirents: import('fs').Dirent[];
+    try {
+      dirents = await fs.readdir(resolvedDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      if (dirent.isDirectory()) {
+        queue.push(path.join(resolvedDir, dirent.name));
+        continue;
+      }
+      if (!dirent.isFile()) continue;
+      const lower = dirent.name.toLowerCase();
+      if (lower.endsWith('.ani.als')) continue;
+      if (!suffixSet.has(path.extname(lower))) continue;
+      const stem = lower.slice(0, lower.length - path.extname(lower).length);
+      if (!isSkillRelatedStem(stem, relatedNames)) continue;
+      out.push(path.join(resolvedDir, dirent.name));
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+function isSkillRelatedStem(stem: string, baseNames: string[]): boolean {
+  const normalizedStem = stem.replace(/\.\[pvp\]$/i, '');
+  for (const baseName of baseNames) {
+    if (normalizedStem === baseName) return true;
+    if (normalizedStem.startsWith(baseName)) return true;
+    if (isPrefixedSkillStem(normalizedStem, baseName)) return true;
+    if (baseName.startsWith(normalizedStem) && normalizedStem.length >= Math.max(5, Math.floor(baseName.length * 0.65))) return true;
+  }
+  return false;
+}
+
+function isPrefixedSkillStem(stem: string, baseName: string): boolean {
+  const suffix = stem.slice(stem.indexOf('_') + 1);
+  if (!stem.includes('_') || !suffix) return false;
+  return suffix === baseName || suffix.startsWith(baseName);
+}
+
+function sortRelatedEntries(entries: UnpackPreviewEntry[], skill: SkillPathInfo): UnpackPreviewEntry[] {
+  return entries.slice().sort((a, b) => relatedEntryScore(a, skill) - relatedEntryScore(b, skill)
+    || String(a.key || a.name || '').localeCompare(String(b.key || b.name || ''), 'en', { sensitivity: 'base' }));
+}
+
+function previewEntryIdentity(entry: UnpackPreviewEntry): string {
+  if (entry.fsPath) return canonicalFsPathKey(entry.fsPath);
+  const key = normalizeUnpackKey(entry.key || entry.name || '');
+  return `${entry.resourceKind || ''}:${key}`;
+}
+
+function canonicalFsPathKey(fsPath: string): string {
+  const resolved = path.resolve(fsPath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function canTraceLinkedResources(entry: UnpackPreviewEntry): boolean {
+  return !!entry.fsPath && (entry.resourceKind === 'nut' || entry.resourceKind === 'obj' || entry.resourceKind === 'act');
+}
+
+function dedupePreviewEntries(entries: UnpackPreviewEntry[]): UnpackPreviewEntry[] {
+  const out: UnpackPreviewEntry[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const key = entry.fsPath
+      ? canonicalFsPathKey(entry.fsPath)
+      : normalizeUnpackKey(entry.key || entry.name || '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
+function relatedEntryScore(entry: UnpackPreviewEntry, skill: SkillPathInfo): number {
+  if (typeof entry.resourceOrder === 'number') return entry.resourceOrder;
+  const name = (entry.name || path.basename(entry.fsPath || '')).toLowerCase();
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length).replace(/\.\[pvp\]$/i, '');
+  const scores = skill.resourceNames.map((baseName, idx) => {
+    const aliasPenalty = idx * 2;
+    if (stem === baseName) return aliasPenalty;
+    if (stem.startsWith(baseName)) return 10 + aliasPenalty;
+    if (isPrefixedSkillStem(stem, baseName)) return 12 + aliasPenalty;
+    return 20 + aliasPenalty;
+  });
+  let score = Math.min(...scores);
+  const key = normalizeUnpackKey(entry.key || '');
+  if (entry.resourceKind === 'nut') score -= 4;
+  if (entry.resourceKind === 'obj') score -= 2;
+  if (entry.resourceKind === 'atk') score -= 1;
+  if (entry.resourceRole === 'skillEffect') score += 1;
+  if (entry.resourceRole === 'avatar') score += 8;
+  if (key.includes('/effect/')) score += 3;
+  if (key.includes('/passiveobject/')) score += 6;
+  if (key.includes('/dsanimation/')) score += 2;
+  if (name.includes('[pvp]')) score += 5;
+  return score;
+}
+
+function sortAnimationPreviewEntries(entries: UnpackPreviewEntry[]): UnpackPreviewEntry[] {
+  return entries.slice().sort((a, b) => orderedResourceCompare(a, b) || animationPreviewEntryScore(a) - animationPreviewEntryScore(b)
+    || String(a.key || a.name || '').localeCompare(String(b.key || b.name || ''), 'en', { sensitivity: 'base' }));
+}
+
+function orderedResourceCompare(a: UnpackPreviewEntry, b: UnpackPreviewEntry): number {
+  const ao = typeof a.resourceOrder === 'number' ? a.resourceOrder : undefined;
+  const bo = typeof b.resourceOrder === 'number' ? b.resourceOrder : undefined;
+  if (typeof ao === 'number' && typeof bo === 'number' && ao !== bo) return ao - bo;
+  if (typeof ao === 'number' && typeof bo !== 'number') return -1;
+  if (typeof ao !== 'number' && typeof bo === 'number') return 1;
+  return 0;
+}
+
+function animationPreviewEntryScore(entry: UnpackPreviewEntry): number {
+  if (typeof entry.resourceOrder === 'number') return entry.resourceOrder - 1000;
+  const name = (entry.name || path.basename(entry.fsPath || '')).toLowerCase();
+  const key = normalizeUnpackKey(entry.key || '');
+  let score = 0;
+  if (entry.resourceRole === 'skillEffect') score -= 18;
+  if (entry.resourceRole === 'action') score += 10;
+  if (entry.resourceRole === 'avatar') score += 30;
+  if (/^[a-z]+1(?:_ds)?(?:\.\[pvp\])?\.ani$/i.test(name)) score -= 20;
+  else if (/\d(?:_ds)?(?:\.\[pvp\])?\.ani$/i.test(name)) score -= 10;
+  if (key.includes('/effect/')) score -= 8;
+  if (key.includes('/particle/')) score += 8;
+  if (key.includes('_ds/')) score += 6;
+  if (name.includes('effect') || name.includes('particle') || name.includes('floor') || name.includes('light') || name.includes('magic')) score -= 4;
+  if (name.includes('[pvp]')) score += 5;
+  return score;
+}
+
+function aniTextImagePathRatio(text: string): number {
+  let frameCount = 0;
+  let imagePathCount = 0;
+  const blockRegex = /\[FRAME\d{3}\]([\s\S]*?)(?=\n\[FRAME|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = blockRegex.exec(text))) {
+    frameCount++;
+    const block = match[1] || '';
+    const image = /\[IMAGE\]\s*\r?\n\s*([^\r\n]*)/i.exec(block)?.[1] || '';
+    const cleaned = cleanValue(image);
+    if (cleaned) imagePathCount++;
+  }
+  return frameCount > 0 ? imagePathCount / frameCount : 0;
+}
+
+function emptyImageCandidatesForAni(aniKey: string): string[] {
+  const normalized = normalizeUnpackKey(aniKey);
+  if (!normalized.endsWith('.ani')) return [];
+  const withoutExt = normalized.slice(0, -'.ani'.length);
+  const parts = withoutExt.split('/').filter(Boolean);
+  const name = parts[parts.length - 1] || '';
+  const candidates: string[] = [];
+  const add = (value: string | undefined) => {
+    const cleaned = normalizeUnpackKey(value || '');
+    if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned);
+  };
+
+  add(`${withoutExt}.img`);
+
+  const passiveMatch = /^passiveobject\/character\/([^/]+)\/animation\/(.+)$/i.exec(withoutExt);
+  if (passiveMatch) {
+    const job = passiveMatch[1];
+    const rel = passiveMatch[2];
+    const relParts = rel.split('/').filter(Boolean);
+    const folder = relParts.length > 1 ? relParts[0] : name.replace(/(?:_ds)?$/i, '').replace(/\d+$/g, '');
+    const baseFolder = folder.replace(/_ds$/i, '');
+    const baseName = name.replace(/_ds$/i, '').replace(/\d+$/g, '');
+    add(`character/${job}/effect/${rel}.img`);
+    add(`character/${job}/effect/${baseFolder}/${name}.img`);
+    add(`character/${job}/effect/${baseFolder}/${baseName}.img`);
+    if (/blastblood/i.test(baseFolder)) {
+      add(`character/${job}/effect/${baseFolder}/bloodred.img`);
+      add(`character/${job}/effect/${baseFolder}/blood.img`);
+      add(`character/${job}/effect/${baseFolder}/blood_floor.img`);
+      add(`character/${job}/effect/${baseFolder}/blastbloodhit.img`);
+    }
+  }
+
+  const characterAnimationMatch = /^character\/([^/]+)\/(?:[^/]+\/)*animation\/(.+)$/i.exec(withoutExt);
+  if (characterAnimationMatch) {
+    const job = characterAnimationMatch[1];
+    add(`character/${job}/effect/${name}.img`);
+  }
+
+  return candidates;
+}
+
+function normalizeTreeRelative(root: string, fsPath: string): string {
+  return normalizeUnpackKey(path.relative(root, fsPath));
+}
+
+function skillResourceSections(entries: UnpackPreviewEntry[]): UnpackPreviewSection[] {
+  const groups: Array<{ title: string; role: UnpackPreviewEntry['resourceRole']; limit: number }> = [
+    { title: '对应 NUT', role: 'script', limit: 12 },
+    { title: '动作', role: 'action', limit: 12 },
+    { title: '时装/角色图集', role: 'avatar', limit: 10 },
+    { title: '技能特效', role: 'skillEffect', limit: 18 },
+    { title: '攻击/对象资源', role: 'attack', limit: 10 },
+    { title: '其他资源', role: 'other', limit: 8 },
+  ];
+  const used = new Set<string>();
+  const sections: UnpackPreviewSection[] = [];
+  for (const group of groups) {
+    const matched = entries
+      .filter(entry => {
+        const role = entry.resourceRole || resourceRoleFromKey(entry.key || entry.name || '', entry.resourceKind);
+        if (group.role === 'attack') return role === 'attack' || role === 'object';
+        return role === group.role;
+      })
+      .filter(entry => {
+        const key = previewEntryIdentity(entry);
+        if (used.has(key)) return false;
+        used.add(key);
+        return true;
+      })
+      .slice(0, group.limit);
+    if (matched.length) sections.push({ title: group.title, entries: matched, tone: 'skill' });
+  }
+  return sections;
+}
+
+function resourceLabel(kind: UnpackPreviewEntry['resourceKind'], role?: UnpackPreviewEntry['resourceRole']): string {
+  if (role === 'script') return 'NUT脚本';
+  if (role === 'action') return '动作';
+  if (role === 'avatar') return '时装/角色图集';
+  if (role === 'skillEffect') return '技能特效';
+  if (role === 'attack') return '攻击信息';
+  if (role === 'object') return '对象';
+  if (kind === 'nut') return 'NUT脚本';
+  if (kind === 'act') return '动作';
+  if (kind === 'als') return '动画图层脚本';
+  if (kind === 'ani') return '动画';
+  if (kind === 'atk') return '攻击信息';
+  if (kind === 'obj') return '对象';
+  if (kind === 'img') return '图集';
+  return '资源';
+}
+
+function extractArchiveResourceRefs(text: string): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string | undefined) => {
+    const cleaned = cleanValue(value);
+    if (!cleaned || !/\.(ani\.als|ani|atk|obj|act|img)$/i.test(cleaned)) return;
+    const key = normalizeUnpackKey(cleaned);
+    if (seen.has(key)) return;
+    seen.add(key);
+    refs.push(cleaned);
+  };
+  const quoted = /[`'"]([^`'"]+\.(?:ani\.als|ani|atk|obj|act|img))[`'"]/gi;
+  let match: RegExpExecArray | null;
+  while ((match = quoted.exec(text))) add(match[1]);
+  const bare = /(^|[\s\t])([A-Za-z0-9_./\\-]+\.(?:ani\.als|ani|atk|obj|act|img))(?=$|[\s\t),;])/gim;
+  while ((match = bare.exec(text))) add(match[2]);
+  return refs;
+}
+
+function resourceKindFromKey(key: string): UnpackPreviewEntry['resourceKind'] | undefined {
+  const normalized = normalizeUnpackKey(key);
+  if (normalized.endsWith('.ani.als')) return 'als';
+  if (normalized.endsWith('.ani')) return 'ani';
+  if (normalized.endsWith('.act')) return 'act';
+  if (normalized.endsWith('.atk')) return 'atk';
+  if (normalized.endsWith('.obj')) return 'obj';
+  if (normalized.endsWith('.img')) return 'img';
+  return undefined;
+}
+
+function resourceRoleFromKey(key: string, kind?: UnpackPreviewEntry['resourceKind']): UnpackPreviewEntry['resourceRole'] {
+  const normalized = normalizeUnpackKey(key);
+  if (kind === 'nut') return 'script';
+  if (kind === 'act') return 'action';
+  if (kind === 'als') return 'skillEffect';
+  if (kind === 'atk') return 'attack';
+  if (kind === 'obj') return 'object';
+  if (normalized.includes('/equipment/avatar/') || normalized.includes('/avatar/')) return 'avatar';
+  if (normalized.includes('/effect/') || normalized.includes('/particle/') || normalized.includes('/ultimateskill')) return 'skillEffect';
+  if (normalized.includes('/passiveobject/') && normalized.includes('/animation/')) return 'skillEffect';
+  if (normalized.includes('/animation/') || /\/(?:animation|atanimation|dsanimation|creatoranimation)\//i.test(normalized)) return 'action';
+  if (kind === 'ani') return 'skillEffect';
+  if (kind === 'img') return 'other';
+  return 'other';
+}
+
+async function resolveReferencedArchiveFile(root: string, baseDir: string, ref: string): Promise<string | undefined> {
+  const cleaned = cleanValue(ref);
+  if (!cleaned) return undefined;
+  const normalized = normalizeUnpackKey(cleaned);
+  const candidates: string[] = [];
+  if (/^([a-z]+\/)/i.test(normalized)) {
+    const archivePath = safeJoinArchivePath(root, normalized);
+    if (archivePath) candidates.push(archivePath);
+  }
+  candidates.push(path.resolve(baseDir, ...normalized.split('/')));
+  for (const candidate of candidates) {
+    if (!isPathInsideRoot(root, candidate)) continue;
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) return candidate;
+    } catch {
+    }
+  }
+  return undefined;
+}
+
+async function resolveWorkspaceOrArchiveReference(root: string, ref: string): Promise<string | undefined> {
+  const cleaned = cleanValue(ref);
+  if (!cleaned) return undefined;
+  const normalized = normalizeUnpackKey(cleaned);
+  const candidates: string[] = [];
+  if (path.isAbsolute(cleaned)) candidates.push(cleaned);
+  const archivePath = safeJoinArchivePath(root, normalized);
+  if (archivePath) candidates.push(archivePath);
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    candidates.push(path.resolve(folder.uri.fsPath, ...normalized.split('/')));
+  }
+  candidates.push(path.resolve(process.cwd(), ...normalized.split('/')));
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) return candidate;
+    } catch {
+    }
+  }
+  return undefined;
+}
+
+function isPathInsideRoot(root: string, fsPath: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(fsPath));
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function safeJoinArchivePath(root: string, key: string): string | undefined {
   const parts = normalizeUnpackKey(key).split('/').filter(Boolean);
   if (parts.length === 0 || parts.some(part => part === '..' || part.includes('\0'))) return undefined;
@@ -1054,6 +2062,11 @@ function labelToken(value: string | undefined): string | undefined {
   const cleaned = cleanValue(value);
   if (!cleaned) return undefined;
   return cleaned.replace(/^\[|\]$/g, '').trim();
+}
+
+function isActiveSkill(tags: ParsedTags): boolean {
+  const skillType = labelToken(firstValue(tags, 'type'))?.toLowerCase();
+  return skillType === 'active';
 }
 
 function labelJob(value: string): string {
@@ -1154,9 +2167,15 @@ type SkillDataKind = 'level' | 'static';
 interface SkillDataScene {
   key: string;
   label: string;
-  levelInfo: string[][];
-  staticData: string[];
+  levelInfo: SkillDataValue[][];
+  staticData: SkillDataValue[];
   levelProperty: string[];
+}
+
+interface SkillDataValue {
+  value: string;
+  line: number;
+  character?: number;
 }
 
 interface SkillDataLabelRef {
@@ -1201,7 +2220,8 @@ function buildSkillDataTables(text: string, parameters?: SkillDataParameterSkill
         caption: `${scene.label} - [level info]`,
         tagName: 'level info',
         headers: ['等级', ...scene.levelInfo[0].map((_value, idx) => skillDataLabel(levelLabels, idx, '动态'))],
-        rows: scene.levelInfo.map((row, idx) => [`Lv.${idx + 1}`, ...row]),
+        rows: scene.levelInfo.map((row, idx) => [`Lv.${idx + 1}`, ...row.map((cell, cellIdx) => formatLevelInfoCell(cell, scene.levelInfo[idx - 1]?.[cellIdx]))]),
+        rowTargets: scene.levelInfo.map(row => skillDataTargetFromValue(row[0])),
       });
     }
 
@@ -1210,7 +2230,8 @@ function buildSkillDataTables(text: string, parameters?: SkillDataParameterSkill
         caption: `${scene.label} - [static data]`,
         tagName: 'static data',
         headers: ['索引', '含义', '值'],
-        rows: scene.staticData.map((value, idx) => [String(idx), skillDataLabel(staticLabels, idx, '静态'), value]),
+        rows: scene.staticData.map((value, idx) => [String(idx), skillDataLabel(staticLabels, idx, '静态'), value.value]),
+        rowTargets: scene.staticData.map(value => skillDataTargetFromValue(value)),
       });
     }
   }
@@ -1242,7 +2263,8 @@ function parseSkillDataScenes(text: string): Map<string, SkillDataScene> {
   let currentBlock: 'level info' | 'static data' | 'level property' | '' = '';
   let inBlockComment = false;
 
-  for (const rawLine of lines) {
+  for (let lineNo = 0; lineNo < lines.length; lineNo++) {
+    const rawLine = lines[lineNo];
     let lineText = rawLine;
     if (inBlockComment) {
       const end = lineText.indexOf('*/');
@@ -1281,15 +2303,15 @@ function parseSkillDataScenes(text: string): Map<string, SkillDataScene> {
         currentBlock = name;
         getScene(sceneStack[sceneStack.length - 1]);
         const inline = stripLineComment(trimmed.slice(tag[0].length)).trim();
-        if (inline) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, inline);
+        if (inline) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, inline, lineNo);
         continue;
       }
       if (currentBlock) {
-        appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed);
+        appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed, lineNo);
       }
       continue;
     }
-    if (currentBlock) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed);
+    if (currentBlock) appendSkillDataLine(getScene(sceneStack[sceneStack.length - 1]), currentBlock, trimmed, lineNo);
   }
 
   for (const scene of scenes.values()) {
@@ -1302,12 +2324,12 @@ function parseSkillDataScenes(text: string): Map<string, SkillDataScene> {
   return scenes;
 }
 
-function appendSkillDataLine(scene: SkillDataScene, block: SkillDataSceneBlock, line: string): void {
+function appendSkillDataLine(scene: SkillDataScene, block: SkillDataSceneBlock, line: string, lineNo: number): void {
   if (block === 'level info') {
-    const values = tokenValues(stripLineComment(line));
+    const values = tokenValuesWithPositions(stripLineComment(line), lineNo);
     if (values.length) scene.levelInfo.push(values);
   } else if (block === 'static data') {
-    const values = tokenValues(stripLineComment(line));
+    const values = tokenValuesWithPositions(stripLineComment(line), lineNo);
     if (values.length) scene.staticData.push(...values);
   } else if (block === 'level property') {
     scene.levelProperty.push(stripLineComment(line).trim());
@@ -1316,17 +2338,43 @@ function appendSkillDataLine(scene: SkillDataScene, block: SkillDataSceneBlock, 
 
 type SkillDataSceneBlock = 'level info' | 'static data' | 'level property';
 
-function normalizeLevelInfoRows(rawRows: string[][]): string[][] {
+function normalizeLevelInfoRows(rawRows: SkillDataValue[][]): SkillDataValue[][] {
   if (!rawRows.length) return [];
   const first = rawRows[0];
-  const colCount = Number(first[0]);
+  const colCount = Number(first[0]?.value);
   if (!Number.isInteger(colCount) || colCount <= 0) return rawRows;
   const packedValues = [...first.slice(1), ...rawRows.slice(1).flat()];
-  const rows: string[][] = [];
+  const rows: SkillDataValue[][] = [];
   for (let i = 0; i < packedValues.length; i += colCount) {
     rows.push(packedValues.slice(i, i + colCount));
   }
   return rows;
+}
+
+function skillDataTargetFromValue(value: SkillDataValue | undefined): { line: number; character?: number } | undefined {
+  if (!value || !Number.isInteger(value.line) || value.line < 0) return undefined;
+  return {
+    line: value.line,
+    ...(typeof value.character === 'number' && value.character >= 0 ? { character: value.character } : {}),
+  };
+}
+
+function formatLevelInfoCell(value: SkillDataValue, previous: SkillDataValue | undefined): string {
+  if (!previous) return value.value;
+  const currentValue = Number(value.value);
+  const previousValue = Number(previous.value);
+  if (!Number.isFinite(currentValue) || !Number.isFinite(previousValue)) return value.value;
+  const absolute = currentValue - previousValue;
+  const absoluteText = signedNumberText(absolute);
+  if (previousValue === 0) return `${value.value}（${absoluteText}）`;
+  const percent = (absolute / previousValue) * 100;
+  if (!Number.isFinite(percent)) return `${value.value}（${absoluteText}）`;
+  return `${value.value}（${absoluteText}，${signedNumberText(percent)}%）`;
+}
+
+function signedNumberText(value: number): string {
+  const text = trimNumber(value);
+  return value >= 0 ? `+${text}` : text;
 }
 
 function parseSkillPropertyRefs(lines: string[]): SkillDataLabelRef[] {
@@ -1564,6 +2612,16 @@ function tokenValues(line: string): string[] {
     .filter(part => /^[-+]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(part));
 }
 
+function tokenValuesWithPositions(line: string, lineNo: number): SkillDataValue[] {
+  const values: SkillDataValue[] = [];
+  const regex = /[-+]?(?:\d+(?:\.\d+)?|\.\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(line))) {
+    values.push({ value: match[0], line: lineNo, character: match.index });
+  }
+  return values;
+}
+
 function numericTokens(line: string): number[] {
   return tokenValues(line).map(Number).filter(Number.isFinite);
 }
@@ -1599,6 +2657,12 @@ function previewIconSettled(metadata: UnpackResolvedMetadata | undefined, reques
   if (!requested) return false;
   if (!metadata?.icon) return true;
   return !!metadata.iconDataUri || metadata.iconState === 'missing' || metadata.iconState === 'error' || metadata.iconState === 'ready';
+}
+
+function previewRenderSettled(preview: UnpackHoverPreview | undefined, requested: boolean): boolean {
+  if (!requested) return false;
+  if (preview?.kind !== 'ani') return true;
+  return !!preview.ani?.timeline?.length || !!preview.message;
 }
 
 function hasSetTags(text: string): boolean {

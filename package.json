@@ -10,9 +10,6 @@
   "categories": [
     "Other"
   ],
-  "extensionDependencies": [
-    "marcinbar.vscode-squirrel"
-  ],
   "activationEvents": [
     "onStartupFinished",
     "onFileSystem:pvf",
@@ -53,6 +50,7 @@
     "onLanguage:pvf-twn",
     "onLanguage:pvf-ui",
     "onLanguage:pvf-wdm",
+    "onLanguage:pvf-nut",
     "onCommand:pvf.editScriptTagComment",
     "onCommand:pvf.editTreeComment"
   ],
@@ -468,6 +466,17 @@
           ".wdm"
         ],
         "configuration": "./src/config/scriptLang/languageConfigurations/generic.json"
+      },
+      {
+        "id": "pvf-nut",
+        "aliases": [
+          "NUT",
+          "pvf-nut"
+        ],
+        "extensions": [
+          ".nut"
+        ],
+        "configuration": "./src/config/scriptLang/languageConfigurations/generic.json"
       }
     ],
     "grammars": [
@@ -655,11 +664,19 @@
         "language": "pvf-wdm",
         "scopeName": "source.pvf-wdm",
         "path": "./src/config/syntaxes/pvf-generic.tmLanguage.json"
+      },
+      {
+        "language": "pvf-nut",
+        "scopeName": "source.pvf-nut",
+        "path": "./src/config/syntaxes/pvf-generic.tmLanguage.json"
       }
     ],
     "configurationDefaults": {
       "workbench.colorCustomizations": {
         "editorWhitespace.foreground": "#7c8794"
+      },
+      "files.associations": {
+        "*.nut": "pvf-nut"
       },
       "[pvf-act]": {
         "editor.renderWhitespace": "boundary",
@@ -882,6 +899,12 @@
         "editor.tabSize": 4,
         "editor.insertSpaces": false,
         "editor.detectIndentation": false
+      },
+      "[pvf-nut]": {
+        "editor.renderWhitespace": "boundary",
+        "editor.tabSize": 4,
+        "editor.insertSpaces": false,
+        "editor.detectIndentation": false
       }
     },
     "colors": [
@@ -1068,7 +1091,7 @@
         "pvf.unpackExplorer.hoverPreview.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "解包目录是否在悬停装备、套装、道具、商店、任务、技能和技能树文件时显示 DNF-like 预览浮窗。"
+          "description": "解包目录是否在悬停 ANI、装备、套装、道具、商店、任务、技能和技能树文件时显示 DNF-like 预览浮窗。"
         },
         "pvf.unpackExplorer.hoverPreview.delayMs": {
           "type": "number",

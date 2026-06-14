@@ -4,11 +4,11 @@ import * as indexer from '../../npk/indexer';
 export interface AlbumEntry { path: string; width: number; height: number; }
 export interface Album { sprites: AlbumEntry[]; /* opaque fields allowed */ }
 
-export async function ensureIndex(context: vscode.ExtensionContext){ try { await indexer.loadIndexFromDisk(context); } catch {} }
+export async function ensureIndex(context: vscode.ExtensionContext){ try { if (!indexer.getIndex()) await indexer.loadIndexFromDisk(context); } catch {} }
 
 const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
 
-export async function loadAlbumForImage(context: vscode.ExtensionContext, root: string, imgLogical: string, out?: vscode.OutputChannel): Promise<any | undefined> {
+export async function loadAlbumForImage(context: vscode.ExtensionContext, root: string, imgLogical: string, out?: vscode.OutputChannel, options: { skipScan?: boolean } = {}): Promise<any | undefined> {
   const fs = await import('fs/promises'); const path = await import('path');
   const cache = (loadAlbumForImage as any)._cache || ((loadAlbumForImage as any)._cache = new Map<string, any>());
   function nDir(d: string){ return d.replace(/^sprite\//,''); }
@@ -79,6 +79,7 @@ export async function loadAlbumForImage(context: vscode.ExtensionContext, root: 
         } catch (e) { try { outc.appendLine(`[Placeholder IDX ERR] ${normalizedKey} -> ${String(e)}`); } catch {} }
       }
     }
+    if (options.skipScan) return undefined;
     // Index not available or no match: slow fallback scanning
     const { readNpkEntries, readNpkFromBuffer, readFileBuffer } = await import('../../npk/npkReader.js');
     const scanDirs = [root, path.join(root, 'ImagePacks2')];
@@ -112,6 +113,7 @@ export async function loadAlbumForImage(context: vscode.ExtensionContext, root: 
     // If placeholder couldn't be resolved, continue to normal path which will likely fail and return undefined.
   }
   // try index
+  try { await ensureIndex(context); } catch {}
   try {
     const rec = await indexer.findNpkFor(normalizedKey);
     if (rec) {
@@ -124,6 +126,7 @@ export async function loadAlbumForImage(context: vscode.ExtensionContext, root: 
       } catch (e) { try { outc.appendLine(`[Index ERR] ${normalizedKey} -> ${String(e)}`); } catch {} }
     }
   } catch (e) { try { outc.appendLine(`[Index ERR] ${normalizedKey} -> ${String(e)}`); } catch {} }
+  if (options.skipScan) return undefined;
   // scan
   const { readNpkEntries, readNpkFromBuffer, readFileBuffer } = await import('../../npk/npkReader.js');
   const scanDirs = [root, path.join(root, 'ImagePacks2')]; let foundAny = false;

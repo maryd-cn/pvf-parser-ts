@@ -47,9 +47,11 @@ interface LayerMeta { id: string; relLayer: number; order: number; kind?: string
 interface UseDecl { id: string; path: string; }
 interface PersistState { axes: boolean; atk: boolean; dmg: boolean; als: boolean; sync: boolean; bg: string; speed: number; zoom: number; }
 
-declare global { interface Window { __ANI_INIT?: { timeline: TimelineFrame[]; layers: LayerMeta[]; uses: UseDecl[]; state: PersistState; }; acquireVsCodeApi?: any; } }
+declare global { interface Window { __ANI_INIT?: { timeline: TimelineFrame[]; layers: LayerMeta[]; uses: UseDecl[]; state: PersistState; }; __PVF_VSCODE_API?: any; acquireVsCodeApi?: any; } }
 
-const vscode = typeof window !== 'undefined' && typeof window.acquireVsCodeApi === 'function' ? window.acquireVsCodeApi() : null;
+const vscode = typeof window !== 'undefined'
+    ? (window.__PVF_VSCODE_API || (window.__PVF_VSCODE_API = typeof window.acquireVsCodeApi === 'function' ? window.acquireVsCodeApi() : null))
+    : null;
 
 const useStyles = makeStyles({
     root: {
@@ -171,7 +173,6 @@ const useAniLogic = () => {
     const [dmg, setDmg] = React.useState(init.state.dmg !== false);
     const [alsOn, setAlsOn] = React.useState(!!init.state.als);
     const [syncEnabled, setSyncEnabled] = React.useState(init.state.sync !== false);
-    const syncRef = React.useRef(true); // 先保持总是同步
     const rafRef = React.useRef<number>();
     const lastTick = React.useRef<number>(performance.now());
     const acc = React.useRef(0);
@@ -187,6 +188,7 @@ const useAniLogic = () => {
         for (let i = 0; i < tl.length; i++) {
             const arr = Array.isArray(tl[i].layers) ? tl[i].layers! : [];
             for (const lf of arr) {
+                if ((lf as any).__main) continue;
                 const id = lf.id || lf.__id || '';
                 if (!id) continue;
                 let rec = m.get(id);
@@ -434,16 +436,27 @@ const useAniLogic = () => {
     React.useEffect(() => {
         if (!playing) { return; }
         const step = (now: number) => {
-            const frame = init.timeline[idx];
-            const delay = (frame.delay || 40) / speed;
             const dt = now - lastTick.current; lastTick.current = now; acc.current += dt;
-            if (acc.current >= delay) { acc.current = 0; setIdx(i => (i + 1) % init.timeline.length); }
+            setIdx(currentIdx => {
+                if (!init.timeline.length) return currentIdx;
+                let nextIdx = currentIdx;
+                let guard = 0;
+                while (guard < init.timeline.length) {
+                    const frame = init.timeline[nextIdx];
+                    const delay = Math.max(1, (frame.delay || 40) / Math.max(0.01, speed));
+                    if (acc.current < delay) break;
+                    acc.current -= delay;
+                    nextIdx = (nextIdx + 1) % init.timeline.length;
+                    guard++;
+                }
+                return nextIdx;
+            });
             rafRef.current = requestAnimationFrame(step);
         };
         lastTick.current = performance.now();
         rafRef.current = requestAnimationFrame(step);
         return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-    }, [playing, speed, idx, init.timeline.length]);
+    }, [playing, speed, init.timeline]);
 
     // 同步来自扩展的消息 (gotoFrame)
     React.useEffect(() => {
@@ -517,6 +530,7 @@ const useAniLogic = () => {
         vscode.postMessage({ type: 'saveAls', adds: seq.map(l => ({ id: l.id, start: l.order, depth: l.relLayer, relLayer: l.relLayer, order: l.order, kind: l.kind })), uses: init.uses });
     };
     const [alsPanelOpen, setAlsPanelOpen] = React.useState(false);
+    const currentDelay = init.timeline[idx]?.delay || 0;
     const ui = (
     <FluentProvider theme={fluentTheme} className={styles.root}>
             <div className={styles.topPanelShell}>
@@ -611,6 +625,7 @@ const useAniLogic = () => {
                     {!alsPanelOpen && <Button onClick={() => setAlsPanelOpen(true)}>ALS</Button>}
 
                     <span>帧 {frameInfo}</span>
+                    <span>延时 {currentDelay}ms</span>
                 </div>
             </div>}
             {/* {!alsPanelOpen && <div style={{ position: 'absolute', top: 4, right: 8, zIndex: 20 }}><Button size='small' onClick={() => setAlsPanelOpen(true)}>展开 ALS</Button></div>} */}

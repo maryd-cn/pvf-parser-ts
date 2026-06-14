@@ -67,14 +67,25 @@
     }, { passive: true });
     previewEl.addEventListener('click', event => {
       const skillTarget = event.target && event.target.closest ? event.target.closest('[data-skill-key]') : null;
-      if (!skillTarget) return;
-      event.preventDefault();
-      const rawCode = Number(skillTarget.getAttribute('data-skill-code') || '');
-      post('openPreviewSkill', {
-        id: hoverTargetId,
-        key: skillTarget.getAttribute('data-skill-key') || '',
-        code: Number.isFinite(rawCode) ? rawCode : undefined,
-      });
+      if (skillTarget) {
+        event.preventDefault();
+        const rawCode = Number(skillTarget.getAttribute('data-skill-code') || '');
+        post('openPreviewSkill', {
+          id: hoverTargetId,
+          key: skillTarget.getAttribute('data-skill-key') || '',
+          code: Number.isFinite(rawCode) ? rawCode : undefined,
+        });
+        return;
+      }
+      const lineTarget = event.target && event.target.closest ? event.target.closest('[data-source-line]') : null;
+      if (lineTarget) {
+        event.preventDefault();
+        post('openPreviewLine', {
+          id: hoverTargetId,
+          line: Number(lineTarget.getAttribute('data-source-line') || '0'),
+          character: Number(lineTarget.getAttribute('data-source-character') || '0'),
+        });
+      }
     });
     document.body.appendChild(previewEl);
     return previewEl;
@@ -557,7 +568,7 @@
     const key = String(row.key || '').toLowerCase();
     const name = String(row.name || '').toLowerCase();
     const target = key || name;
-    if (target.endsWith('.equ') || target.endsWith('.stk') || target.endsWith('.shp') || target.endsWith('.qst') || target.endsWith('.skl')) return 'strong';
+    if (target.endsWith('.ani') || target.endsWith('.equ') || target.endsWith('.stk') || target.endsWith('.shp') || target.endsWith('.qst') || target.endsWith('.skl')) return 'strong';
     if (/^clientonly\/skilltree\/.+_(sp|tp)\.co$/i.test(key)) return 'strong';
     if (/^clientonly\/skillshoptree(sp|tp)index\.co$/i.test(key)) return 'strong';
     if (/^etc\/pvpskilltree\/.+\.etc$/i.test(key)) return 'strong';
@@ -803,9 +814,23 @@
     const tbody = document.createElement('tbody');
     for (const row of table.rows || []) {
       const tr = document.createElement('tr');
-      for (const cellText of row || []) {
+      const rowIndex = tbody.children.length;
+      for (let cellIndex = 0; cellIndex < (row || []).length; cellIndex++) {
+        const cellText = row[cellIndex];
         const td = document.createElement('td');
-        td.textContent = cellText || '';
+        const target = cellIndex === 0 ? table.rowTargets?.[rowIndex] : null;
+        if (target && Number.isInteger(target.line)) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'preview-table-link';
+          button.dataset.sourceLine = String(target.line);
+          button.dataset.sourceCharacter = String(Number.isInteger(target.character) ? target.character : 0);
+          button.title = `跳转到第 ${target.line + 1} 行`;
+          button.textContent = cellText || '';
+          td.appendChild(button);
+        } else {
+          td.textContent = cellText || '';
+        }
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -838,7 +863,7 @@
     name.textContent = `${prefix}${entry.name || (entry.unresolved ? '未解析' : '')}${qty}`;
     body.appendChild(name);
 
-    const details = [entry.branch, typeof entry.x === 'number' && typeof entry.y === 'number' ? `坐标 ${entry.x}, ${entry.y}` : '', entry.common ? '通用' : '', entry.key, entry.detail]
+    const details = [entry.resourceRole ? resourceRoleLabel(entry.resourceRole) : (entry.resourceKind ? String(entry.resourceKind).toUpperCase() : ''), entry.branch, typeof entry.x === 'number' && typeof entry.y === 'number' ? `坐标 ${entry.x}, ${entry.y}` : '', entry.common ? '通用' : '', entry.key, entry.detail]
       .filter(Boolean)
       .join('  ');
     if (details) {
@@ -871,6 +896,16 @@
       map.appendChild(dot);
     }
     return map;
+  }
+
+  function resourceRoleLabel(role) {
+    if (role === 'script') return 'NUT脚本';
+    if (role === 'action') return '动作';
+    if (role === 'avatar') return '时装/角色';
+    if (role === 'skillEffect') return '技能特效';
+    if (role === 'attack') return '攻击信息';
+    if (role === 'object') return '对象';
+    return '资源';
   }
 
   function renderSkillTrees(groups) {
