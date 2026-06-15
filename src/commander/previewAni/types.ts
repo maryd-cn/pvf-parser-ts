@@ -34,4 +34,7 @@ export interface TimelineFrame {
   tint?: Tint;
   atk?: Box3D[];
   dmg?: Box3D[];
+  timeMs?: number;
+  __img?: string;
+  __frameIndex?: number;
 }

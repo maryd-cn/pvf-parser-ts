@@ -3,7 +3,7 @@ import { Deps } from './types';
 import * as indexer from '../npk/indexer';
 import { parseAniText } from './previewAni/parseAni';
 import { buildTimelineFromFrames, buildTimelineFromPvfFrames, buildCompositeTimeline, expandAlsLayers } from './previewAni/buildTimeline';
-import { parseAlsText } from './previewAni/parseAls';
+import { alsLayerInstanceId, parseAlsText } from './previewAni/parseAls';
 // React 重写后不再使用旧 HTML 构造器
 // import { buildPreviewHtml } from './previewAni/webviewHtml';
 
@@ -79,7 +79,7 @@ export function registerPreviewAni(context: vscode.ExtensionContext, deps: Deps)
     } catch { superArmorIdx = null; }
 
     // === 处理同名 .ani.als 附加图层 ===
-  let lastAlsMeta: { uses: { id: string; path: string }[]; adds: { id: string; relLayer: number; order: number; kind?: string }[] } | null = null;
+  let lastAlsMeta: { uses: { id: string; path: string }[]; adds: { id: string; sourceId?: string; relLayer: number; order: number; kind?: string }[] } | null = null;
   try {
       const baseDirFs = !isPvfDocument ? require('path').dirname(doc.fileName) : '';
       let alsText: string | undefined;
@@ -126,7 +126,7 @@ export function registerPreviewAni(context: vscode.ExtensionContext, deps: Deps)
         const parsedAls = parseAlsText(alsText, out);
         lastAlsMeta = {
           uses: Array.from(parsedAls.uses.values()).map(u => ({ id: u.id, path: u.path })),
-          adds: parsedAls.adds.map(a => ({ id: a.id, relLayer: a.relLayer, order: a.order, kind: a.kind }))
+          adds: parsedAls.adds.map((a, seq) => ({ id: alsLayerInstanceId(parsedAls.adds, seq) || a.id, sourceId: a.id, relLayer: a.relLayer, order: a.order, kind: a.kind }))
         };
         if (parsedAls.adds.length > 0) {
           const layerMap = await expandAlsLayers(isPvfDocument, context, deps.model, root, isPvfDocument ? pvfBaseDir : baseDirFs, parsedAls, out);
@@ -161,7 +161,7 @@ export function registerPreviewAni(context: vscode.ExtensionContext, deps: Deps)
     const toolkitUri = vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'webview-ui-toolkit', 'dist', 'toolkit.js');
     const toolkitSrc = panel.webview.asWebviewUri(toolkitUri).toString();
   const webview = panel.webview;
-  const addsWithSeq = (lastAlsMeta?.adds||[]).map((a,i)=>({id:a.id, relLayer:a.relLayer, order:a.order, kind:a.kind, seq:i}));
+  const addsWithSeq = (lastAlsMeta?.adds||[]).map((a,i)=>({id:a.id, sourceId:a.sourceId, relLayer:a.relLayer, order:a.order, kind:a.kind, seq:i}));
   const initState = loadState();
   // React 版：注入初始化数据与脚本 (aniPreview.js)
   const scriptUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media','webview','aniPreview.js')).toString();

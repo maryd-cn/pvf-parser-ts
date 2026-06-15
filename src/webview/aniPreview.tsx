@@ -35,17 +35,49 @@ const UI_COLORS = {
 interface LayerFrame {
     __main?: boolean;
     __id?: string;
+    __sourceId?: string;
+    __rel?: number;
+    __order?: number;
+    __start?: number;
+    __startMs?: number;
+    __durationMs?: number;
+    __frameIndex?: number;
+    __timeMs?: number;
+    __img?: string;
     id?: string;
     dx: number; dy: number; w: number; h: number; ox: number; oy: number;
+    fid?: number;
     rot?: number; sx?: number; sy?: number; rgba: string; tint?: number[]; gfx?: string;
     // 缓存轮廓路径，避免重复计算
     __outlinePath?: Path2D;
 }
 interface Box3D { x: number; y: number; z: number; w: number; h: number; d: number; }
-interface TimelineFrame { layers?: LayerFrame[]; delay?: number; atk?: Box3D[]; dmg?: Box3D[]; }
-interface LayerMeta { id: string; relLayer: number; order: number; kind?: string; seq?: number; }
+interface TimelineFrame { layers?: LayerFrame[]; delay?: number; timeMs?: number; dx?: number; dy?: number; fid?: number; __img?: string; __frameIndex?: number; atk?: Box3D[]; dmg?: Box3D[]; }
+interface StageKeyframeMeta { timeMs: number; durationMs: number; img: string; fid: number; frameIndex: number; dx?: number; dy?: number; }
+interface LayerMeta { id: string; sourceId?: string; relLayer: number; order: number; kind?: string; seq?: number; startMs?: number; durationMs?: number; keyframes?: StageKeyframeMeta[]; }
 interface UseDecl { id: string; path: string; }
 interface PersistState { axes: boolean; atk: boolean; dmg: boolean; als: boolean; sync: boolean; bg: string; speed: number; zoom: number; }
+interface StageTimelineRow {
+    id: string;
+    label: string;
+    sourceId?: string;
+    sourcePath?: string;
+    relLayer: number;
+    declaredStart: number;
+    startMs: number;
+    endMs: number;
+    durationMs: number;
+    keyframes: StageKeyframeMeta[];
+    kind?: string;
+    seq: number;
+    isMain?: boolean;
+    active: boolean;
+}
+interface LayerFrameStore {
+    frames: Map<number, LayerFrame>;
+    minLocalFrame: number;
+    maxLocalFrame: number;
+}
 
 declare global { interface Window { __ANI_INIT?: { timeline: TimelineFrame[]; layers: LayerMeta[]; uses: UseDecl[]; state: PersistState; }; __PVF_VSCODE_API?: any; acquireVsCodeApi?: any; } }
 
@@ -53,16 +85,98 @@ const vscode = typeof window !== 'undefined'
     ? (window.__PVF_VSCODE_API || (window.__PVF_VSCODE_API = typeof window.acquireVsCodeApi === 'function' ? window.acquireVsCodeApi() : null))
     : null;
 
+const TIMELINE_UNIT_MS = 10;
+const TIMELINE_UNIT_WIDTH = 4;
+const TIMELINE_ROW_HEIGHT = 24;
+const MAX_KEYFRAME_MARKERS_PER_ROW = 240;
+
+function basenameForDisplay(value: string | undefined): string {
+    if (!value) return '';
+    const normalized = value.replace(/\\/g, '/');
+    const name = normalized.split('/').filter(Boolean).pop() || normalized;
+    return name || value;
+}
+
+function sourceIdForLayer(meta: LayerMeta): string {
+    return meta.sourceId || meta.id.replace(/#\d+$/i, '');
+}
+
+function timelineMarkStepMs(durationMs: number): number {
+    if (durationMs > 6000) return 1000;
+    if (durationMs > 3000) return 500;
+    if (durationMs > 1200) return 200;
+    return 100;
+}
+
+function timeToTimelineX(ms: number): number {
+    return Math.max(0, Math.round(ms / TIMELINE_UNIT_MS) * TIMELINE_UNIT_WIDTH);
+}
+
+function timelineXToTime(px: number): number {
+    return Math.max(0, Math.round(px / TIMELINE_UNIT_WIDTH) * TIMELINE_UNIT_MS);
+}
+
+function durationToTimelineWidth(ms: number): number {
+    return Math.max(TIMELINE_UNIT_WIDTH, Math.ceil(Math.max(TIMELINE_UNIT_MS, ms) / TIMELINE_UNIT_MS) * TIMELINE_UNIT_WIDTH);
+}
+
+function frameStartTimes(timeline: TimelineFrame[]): number[] {
+    const out: number[] = [];
+    let cursor = 0;
+    for (let i = 0; i < timeline.length; i++) {
+        const explicit = typeof timeline[i].timeMs === 'number' ? timeline[i].timeMs! : cursor;
+        out.push(explicit);
+        cursor = explicit + Math.max(1, timeline[i].delay || TIMELINE_UNIT_MS);
+    }
+    return out;
+}
+
+function timelineDurationMs(timeline: TimelineFrame[], starts: number[]): number {
+    if (!timeline.length) return 0;
+    const lastIndex = timeline.length - 1;
+    return (starts[lastIndex] || 0) + Math.max(1, timeline[lastIndex].delay || TIMELINE_UNIT_MS);
+}
+
+function frameIndexAtTimeMs(starts: number[], timeline: TimelineFrame[], ms: number): number {
+    if (!timeline.length) return 0;
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const start = starts[mid] || 0;
+        const end = start + Math.max(1, timeline[mid]?.delay || TIMELINE_UNIT_MS);
+        if (ms < start) hi = mid - 1;
+        else if (ms >= end) lo = mid + 1;
+        else return mid;
+    }
+    return Math.max(0, Math.min(timeline.length - 1, lo));
+}
+
+function layerBarColor(row: StageTimelineRow): string {
+    if (row.isMain) return '#6aa6ff';
+    const colors = ['#7bd88f', '#f8c555', '#ff8a65', '#b084f5', '#4dd0e1', '#f06292', '#a3e635'];
+    const seed = Math.abs(row.relLayer * 17 + row.seq * 11 + row.id.length);
+    return colors[seed % colors.length];
+}
+
+function visibleKeyframesForRow(row: StageTimelineRow): StageKeyframeMeta[] {
+    if (row.keyframes.length <= MAX_KEYFRAME_MARKERS_PER_ROW) return row.keyframes;
+    const step = Math.ceil(row.keyframes.length / MAX_KEYFRAME_MARKERS_PER_ROW);
+    return row.keyframes.filter((_frame, index) => index === 0 || index === row.keyframes.length - 1 || index % step === 0);
+}
+
 const useStyles = makeStyles({
     root: {
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
-        height: '100%',
+        minHeight: '100%',
         width: '100%',
         fontFamily: '"Microsoft YaHei","微软雅黑","Segoe UI",Arial',
         background: 'var(--vscode-editor-background)',
-        overflow: 'hidden'
+        overflow: 'visible',
+        padding: '8px',
+        boxSizing: 'border-box'
     },
     topPanelShell: {
         position: 'absolute',
@@ -120,7 +234,18 @@ const useStyles = makeStyles({
         borderRadius: '4px',
     background: UI_COLORS.valueBadgeBgToken
     },
-    canvasWrap: { position: 'relative', flex: 1, ...shorthands.overflow('hidden'), display: 'flex', marginTop: 0 },
+    canvasWrap: {
+        position: 'relative',
+        flex: '1 1 auto',
+        height: 'max(520px, 62vh)',
+        minHeight: '520px',
+        ...shorthands.overflow('hidden'),
+        display: 'flex',
+        marginTop: 0,
+        border: `1px solid ${UI_COLORS.sectionBorder}`,
+        borderRadius: '4px',
+        background: tokens.colorNeutralBackground1
+    },
     canvas: { width: '100%', height: '100%', display: 'block', outline: 'none', flex: 1 },
     topOverlayBar: {
         position: 'absolute',
@@ -155,7 +280,157 @@ const useStyles = makeStyles({
         zIndex: 5,
         pointerEvents: 'none'
     },
-    miniBarContent: { display: 'flex', alignItems: 'center', gap: '8px', pointerEvents: 'auto', flexWrap: 'wrap', rowGap: '4px', maxWidth: '100%' }
+    miniBarContent: { display: 'flex', alignItems: 'center', gap: '8px', pointerEvents: 'auto', flexWrap: 'wrap', rowGap: '4px', maxWidth: '100%' },
+    stageTimelineShell: {
+        flex: '0 0 auto',
+        marginTop: '8px',
+        minHeight: '84px',
+        background: tokens.colorNeutralBackground1,
+        border: `1px solid ${UI_COLORS.sectionBorder}`,
+        borderRadius: '4px',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'visible'
+    },
+    stageTimelineHeader: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px',
+        padding: '6px 8px',
+        borderBottom: `1px solid ${UI_COLORS.sectionBorder}`,
+        fontSize: '11px'
+    },
+    stageTimelineTitle: {
+        fontWeight: 600,
+        whiteSpace: 'nowrap'
+    },
+    stageTimelineStats: {
+        display: 'flex',
+        gap: '8px',
+        opacity: .75,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+    },
+    stageTimelineBody: {
+        overflow: 'auto',
+        flex: '0 0 auto',
+        minHeight: 0
+    },
+    stageTimelineGrid: {
+        display: 'grid',
+        alignItems: 'stretch',
+        minWidth: '100%'
+    },
+    stageTimelineCorner: {
+        position: 'sticky',
+        left: 0,
+        top: 0,
+        zIndex: 4,
+        background: tokens.colorNeutralBackground2,
+        borderRight: `1px solid ${UI_COLORS.sectionBorder}`,
+        borderBottom: `1px solid ${UI_COLORS.sectionBorder}`,
+        padding: '4px 8px',
+        fontSize: '11px',
+        fontWeight: 600
+    },
+    stageTimelineRuler: {
+        position: 'sticky',
+        top: 0,
+        zIndex: 3,
+        height: `${TIMELINE_ROW_HEIGHT}px`,
+        borderBottom: `1px solid ${UI_COLORS.sectionBorder}`,
+        background: tokens.colorNeutralBackground2,
+        overflow: 'hidden'
+    },
+    stageTimelineLabel: {
+        position: 'sticky',
+        left: 0,
+        zIndex: 2,
+        borderRight: `1px solid ${UI_COLORS.sectionBorder}`,
+        borderBottom: `1px solid ${UI_COLORS.sectionBorder}`,
+        background: tokens.colorNeutralBackground1,
+        padding: '3px 7px',
+        minWidth: 0,
+        cursor: 'pointer'
+    },
+    stageTimelineLabelActive: {
+        background: UI_COLORS.layerActiveBg
+    },
+    stageTimelineLabelName: {
+        fontSize: '11px',
+        fontWeight: 600,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+    },
+    stageTimelineLabelMeta: {
+        marginTop: '1px',
+        fontSize: '10px',
+        opacity: .68,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+    },
+    stageTimelineTrack: {
+        position: 'relative',
+        height: `${TIMELINE_ROW_HEIGHT}px`,
+        borderBottom: `1px solid ${UI_COLORS.sectionBorder}`,
+        backgroundImage: 'linear-gradient(90deg, rgba(128,128,128,0.18) 1px, transparent 1px)',
+        backgroundRepeat: 'repeat',
+        cursor: 'pointer'
+    },
+    stageTimelineTrackActive: {
+        backgroundColor: 'rgba(0,120,215,0.10)'
+    },
+    stageTimelineBar: {
+        position: 'absolute',
+        top: '5px',
+        height: '14px',
+        borderRadius: '3px',
+        border: '1px solid rgba(0,0,0,0.38)',
+        boxShadow: 'inset 0 1px rgba(255,255,255,0.28)',
+        overflow: 'hidden'
+    },
+    stageTimelineBarText: {
+        display: 'block',
+        padding: '0 5px',
+        fontSize: '10px',
+        lineHeight: '13px',
+        color: '#101010',
+        textShadow: '0 1px rgba(255,255,255,0.28)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        pointerEvents: 'none'
+    },
+    stageTimelinePlayhead: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        width: '2px',
+        background: '#ff4d4f',
+        pointerEvents: 'none',
+        zIndex: 1
+    },
+    stageTimelineKeyframe: {
+        position: 'absolute',
+        top: '2px',
+        width: '4px',
+        height: '20px',
+        borderRadius: '2px',
+        background: 'rgba(255,255,255,0.88)',
+        border: '1px solid rgba(0,0,0,0.35)',
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.16)',
+        cursor: 'default',
+        zIndex: 2
+    },
+    stageTimelineEmpty: {
+        padding: '10px 12px',
+        fontSize: '12px',
+        opacity: .65
+    }
 });
 
 
@@ -182,8 +457,11 @@ const useAniLogic = () => {
     // ALS 工作层元数据（按原 seq 排序，不主动重排）
     const [workingLayers, setWorkingLayers] = React.useState<LayerMeta[]>(() => init.layers.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0)));
     const [selectedLayerId, setSelectedLayerId] = React.useState<string | null>(null);
+    const hasTimeBasedLayers = React.useMemo(() => workingLayers.some(meta => typeof meta.startMs === 'number' || typeof meta.durationMs === 'number' || !!meta.keyframes?.length), [workingLayers]);
     const layerFrameStore = React.useMemo(() => {
-        const m = new Map<string, { frames: LayerFrame[]; originalStart: number }>();
+        const originalMetaById = new Map<string, LayerMeta>();
+        for (const meta of init.layers || []) originalMetaById.set(meta.id, meta);
+        const m = new Map<string, LayerFrameStore>();
         const tl = init.timeline;
         for (let i = 0; i < tl.length; i++) {
             const arr = Array.isArray(tl[i].layers) ? tl[i].layers! : [];
@@ -191,13 +469,119 @@ const useAniLogic = () => {
                 if ((lf as any).__main) continue;
                 const id = lf.id || lf.__id || '';
                 if (!id) continue;
+                const declaredStart = originalMetaById.get(id)?.order ?? lf.__start ?? lf.__order ?? i;
+                const localFrame = i - declaredStart;
                 let rec = m.get(id);
-                if (!rec) { rec = { frames: [], originalStart: i }; m.set(id, rec); }
-                rec.frames.push(lf);
+                if (!rec) {
+                    rec = { frames: new Map<number, LayerFrame>(), minLocalFrame: localFrame, maxLocalFrame: localFrame };
+                    m.set(id, rec);
+                }
+                rec.frames.set(localFrame, lf);
+                rec.minLocalFrame = Math.min(rec.minLocalFrame, localFrame);
+                rec.maxLocalFrame = Math.max(rec.maxLocalFrame, localFrame);
             }
         }
         return m;
-    }, [init.timeline]);
+    }, [init.layers, init.timeline]);
+    const timelineStartMs = React.useMemo(() => frameStartTimes(init.timeline), [init.timeline]);
+    const totalDurationMs = React.useMemo(() => timelineDurationMs(init.timeline, timelineStartMs), [init.timeline, timelineStartMs]);
+    const currentTimeMs = timelineStartMs[idx] || 0;
+    const useDeclById = React.useMemo(() => {
+        const m = new Map<string, UseDecl>();
+        for (const use of init.uses || []) m.set(use.id, use);
+        return m;
+    }, [init.uses]);
+    const keyframesFromTimeline = React.useCallback((id: string, meta?: LayerMeta): StageKeyframeMeta[] => {
+        const out: StageKeyframeMeta[] = [];
+        let lastFrameIndex = -1;
+        let lastImg = '';
+        let lastFid: number | undefined = undefined;
+        for (let i = 0; i < init.timeline.length; i++) {
+            const frame = init.timeline[i];
+            const arr = Array.isArray(frame.layers) ? frame.layers! : [];
+            const layer = arr.find(item => {
+                const layerId = item.__main ? 'MAIN' : (item.id || item.__id || '');
+                return layerId === id;
+            }) || (id === 'MAIN' && !arr.length ? ({ dx: frame.dx || 0, dy: frame.dy || 0, fid: frame.fid, __img: frame.__img, __frameIndex: frame.__frameIndex } as LayerFrame) : undefined);
+            if (!layer) continue;
+            const frameIndex = typeof layer.__frameIndex === 'number' ? layer.__frameIndex : i - (meta?.order || 0);
+            const img = layer.__img || '';
+            const fid = typeof layer.fid === 'number' ? layer.fid : 0;
+            if (frameIndex === lastFrameIndex && img === lastImg && fid === lastFid) continue;
+            const timeMs = timelineStartMs[i] || 0;
+            out.push({
+                timeMs,
+                durationMs: Math.max(1, init.timeline[i].delay || TIMELINE_UNIT_MS),
+                img,
+                fid,
+                frameIndex,
+                dx: layer.dx,
+                dy: layer.dy,
+            });
+            lastFrameIndex = frameIndex;
+            lastImg = img;
+            lastFid = fid;
+        }
+        return out;
+    }, [init.timeline, timelineStartMs]);
+    const stageTimelineRows = React.useMemo<StageTimelineRow[]>(() => {
+        const rows: StageTimelineRow[] = [];
+        const mainUse = useDeclById.get('MAIN');
+        if (init.timeline.length > 0) {
+            const mainMeta = workingLayers.find(meta => meta.id === 'MAIN');
+            const mainKeyframes = mainMeta?.keyframes?.length ? mainMeta.keyframes : keyframesFromTimeline('MAIN', mainMeta);
+            rows.push({
+                id: 'MAIN',
+                label: basenameForDisplay(mainUse?.path) || 'MAIN',
+                sourceId: 'MAIN',
+                sourcePath: mainUse?.path,
+                relLayer: 0,
+                declaredStart: 0,
+                startMs: 0,
+                endMs: totalDurationMs,
+                durationMs: totalDurationMs,
+                keyframes: mainKeyframes,
+                seq: -1,
+                isMain: true,
+                active: currentTimeMs >= 0 && currentTimeMs < totalDurationMs
+            });
+        }
+        workingLayers.forEach((meta, seq) => {
+            if (meta.id === 'MAIN') return;
+            const rec = layerFrameStore.get(meta.id);
+            const sourceId = sourceIdForLayer(meta);
+            const sourcePath = useDeclById.get(sourceId)?.path;
+            const keyframes = meta.keyframes?.length ? meta.keyframes : keyframesFromTimeline(meta.id, meta);
+            const startMs = typeof meta.startMs === 'number'
+                ? meta.startMs
+                : (keyframes[0]?.timeMs ?? (rec ? (timelineStartMs[Math.max(0, meta.order + rec.minLocalFrame)] || 0) : 0));
+            const inferredEndMs = keyframes.length
+                ? Math.max(...keyframes.map(frame => frame.timeMs + Math.max(1, frame.durationMs || TIMELINE_UNIT_MS)))
+                : startMs;
+            const durationMs = typeof meta.durationMs === 'number' ? meta.durationMs : Math.max(0, inferredEndMs - startMs);
+            const endMs = Math.max(startMs + durationMs, inferredEndMs);
+            rows.push({
+                id: meta.id,
+                label: basenameForDisplay(sourcePath) || sourceId || meta.id,
+                sourceId,
+                sourcePath,
+                relLayer: meta.relLayer,
+                declaredStart: meta.order,
+                startMs,
+                endMs,
+                durationMs: Math.max(0, endMs - startMs),
+                keyframes,
+                kind: meta.kind,
+                seq: typeof meta.seq === 'number' ? meta.seq : seq,
+                active: endMs > startMs && currentTimeMs >= startMs && currentTimeMs < endMs
+            });
+        });
+        return rows.sort((a, b) => {
+            if (a.relLayer !== b.relLayer) return b.relLayer - a.relLayer;
+            if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+            return a.seq - b.seq;
+        });
+        }, [currentTimeMs, init.timeline.length, keyframesFromTimeline, layerFrameStore, timelineStartMs, totalDurationMs, useDeclById, workingLayers]);
 
     // base64 -> Uint8Array
     const b64ToU8 = React.useCallback((s: string) => {
@@ -311,14 +695,17 @@ const useAniLogic = () => {
             // 组合 ALS: 若 alsOn 开启且存在 workingLayers，则动态组合；否则直接使用当前帧 layers
             let compositeLayers: any[] = [];
             if (rawFrame) {
-                if (alsOn) {
+                if (hasTimeBasedLayers) {
+                    compositeLayers = Array.isArray(rawFrame.layers) ? rawFrame.layers.slice() : [];
+                } else if (alsOn) {
                     const mainLayer = rawFrame.layers?.find((l: any) => (l as any).__main) || rawFrame.layers?.[0];
                     if (mainLayer) compositeLayers.push(mainLayer);
                     for (const meta of workingLayers) {
+                        if (meta.id === 'MAIN') continue;
                         const rec = layerFrameStore.get(meta.id); if (!rec) continue;
-                        const relIndex = idx - meta.order; // startFrame = order
-                        if (relIndex < 0 || relIndex >= rec.frames.length) continue;
-                        const baseFrame = rec.frames[relIndex];
+                        const relIndex = idx - meta.order;
+                        const baseFrame = rec.frames.get(relIndex);
+                        if (!baseFrame) continue;
                         compositeLayers.push({ ...baseFrame, __rel: meta.relLayer, __start: meta.order, __id: meta.id });
                     }
                     compositeLayers.sort((a, b) => {
@@ -332,7 +719,7 @@ const useAniLogic = () => {
                     if (mainLayer) compositeLayers.push(mainLayer);
                 }
             }
-            let frameLayersToDraw = alsOn ? compositeLayers : (compositeLayers.length ? compositeLayers : (rawFrame?.layers || []));
+            let frameLayersToDraw = hasTimeBasedLayers || alsOn ? compositeLayers : (compositeLayers.length ? compositeLayers : (rawFrame?.layers || []));
             // 兼容旧结构：时间轴帧没有 layers 属性时，将根帧视为主层
             if ((!frameLayersToDraw || frameLayersToDraw.length === 0) && rawFrame && !rawFrame.layers && rawFrame.rgba) {
                 frameLayersToDraw = [{ ...rawFrame, __main: true }];
@@ -426,7 +813,7 @@ const useAniLogic = () => {
         } catch (e) {
             console.error('[aniPreview draw error]', e);
         }
-    }, [idx, bg, zoom, axes, atk, dmg, alsOn, init.timeline, cam.x, cam.y, b64ToU8, workingLayers]);
+    }, [idx, bg, zoom, axes, atk, dmg, alsOn, hasTimeBasedLayers, init.timeline, cam.x, cam.y, b64ToU8, workingLayers]);
 
     React.useEffect(() => { draw(); });
     React.useEffect(() => { const r = () => draw(); window.addEventListener('resize', r); return () => window.removeEventListener('resize', r); }, [draw]);
@@ -527,10 +914,148 @@ const useAniLogic = () => {
     const saveAls = () => {
         if (!vscode) return;
         const seq = workingLayers; // 保持当前顺序
-        vscode.postMessage({ type: 'saveAls', adds: seq.map(l => ({ id: l.id, start: l.order, depth: l.relLayer, relLayer: l.relLayer, order: l.order, kind: l.kind })), uses: init.uses });
+        vscode.postMessage({ type: 'saveAls', adds: seq.map(l => ({ id: l.sourceId || l.id, start: l.order, depth: l.relLayer, relLayer: l.relLayer, order: l.order, kind: l.kind })), uses: init.uses });
     };
     const [alsPanelOpen, setAlsPanelOpen] = React.useState(false);
+    const [stageTimelineOpen, setStageTimelineOpen] = React.useState(true);
     const currentDelay = init.timeline[idx]?.delay || 0;
+    const frameCount = init.timeline.length;
+    const timelineWidth = Math.max(durationToTimelineWidth(totalDurationMs), 1);
+    const rulerStepMs = timelineMarkStepMs(totalDurationMs);
+    const rulerMarks = React.useMemo(() => {
+        const marks: number[] = [];
+        for (let time = 0; time <= totalDurationMs; time += rulerStepMs) {
+            marks.push(time);
+        }
+        if (totalDurationMs > 0) marks.push(totalDurationMs);
+        return Array.from(new Set(marks)).sort((a, b) => a - b);
+    }, [totalDurationMs, rulerStepMs]);
+    const gotoFrameFromTrack = (event: React.MouseEvent<HTMLElement>) => {
+        if (!frameCount) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const ms = timelineXToTime(event.clientX - rect.left);
+        setIdx(frameIndexAtTimeMs(timelineStartMs, init.timeline, ms));
+    };
+    const selectedTimelineRow = selectedLayerId ? stageTimelineRows.find(row => row.id === selectedLayerId) : undefined;
+    const depthCount = React.useMemo(() => new Set(stageTimelineRows.map(row => row.relLayer)).size, [stageTimelineRows]);
+    const timelineHeight = Math.max(84, 32 + (stageTimelineRows.length + 1) * TIMELINE_ROW_HEIGHT);
+    const stageTimeline = stageTimelineOpen ? (
+        <div className={styles.stageTimelineShell} style={{ minHeight: timelineHeight }}>
+            <div className={styles.stageTimelineHeader}>
+                <div className={styles.stageTimelineTitle}>舞台时间轴</div>
+                <div className={styles.stageTimelineStats}>
+                    <span>时间 {currentTimeMs}ms / {totalDurationMs}ms</span>
+                    <span>元件 {Math.max(0, stageTimelineRows.length - 1)}</span>
+                    <span>图层 {depthCount}</span>
+                    {selectedTimelineRow && <span>{selectedTimelineRow.id} layer={selectedTimelineRow.relLayer} start={selectedTimelineRow.startMs}ms</span>}
+                </div>
+            </div>
+            {stageTimelineRows.length ? (
+                <div className={styles.stageTimelineBody}>
+                    <div
+                        className={styles.stageTimelineGrid}
+                        style={{ gridTemplateColumns: `190px ${timelineWidth}px`, gridAutoRows: `${TIMELINE_ROW_HEIGHT}px` }}
+                    >
+                        <div className={styles.stageTimelineCorner}>图层 / 元件</div>
+                        <div
+                            className={styles.stageTimelineRuler}
+                            onClick={gotoFrameFromTrack}
+                            style={{ width: timelineWidth, backgroundSize: `${TIMELINE_UNIT_WIDTH}px 100%` }}
+                        >
+                            {rulerMarks.map(mark => (
+                                <div key={mark} style={{ position: 'absolute', left: timeToTimelineX(mark) + 2, top: 3, fontSize: 10, opacity: .72 }}>
+                                    {mark}ms
+                                </div>
+                            ))}
+                            <div className={styles.stageTimelinePlayhead} style={{ left: timeToTimelineX(currentTimeMs) }} />
+                        </div>
+                        {stageTimelineRows.map(row => {
+                            const activeClass = row.active ? ` ${styles.stageTimelineLabelActive}` : '';
+                            const barWidth = durationToTimelineWidth(row.durationMs);
+                            const color = layerBarColor(row);
+                            const visibleKeyframes = visibleKeyframesForRow(row);
+                            const markerSampled = visibleKeyframes.length < row.keyframes.length;
+                            const labelTitle = [
+                                row.isMain ? `主 ANI ${row.sourcePath || ''}` : row.sourcePath,
+                                `layer=${row.relLayer}`,
+                                `start=${row.startMs}ms`,
+                                `duration=${row.durationMs}ms`,
+                                markerSampled ? `keyframes=${row.keyframes.length}, markers=${visibleKeyframes.length}` : `keyframes=${row.keyframes.length}`,
+                                row.kind
+                            ].filter(Boolean).join('  ');
+                            return (
+                                <React.Fragment key={row.id}>
+                                    <div
+                                        className={styles.stageTimelineLabel + activeClass}
+                                        title={labelTitle}
+                                        onClick={() => setSelectedLayerId(row.isMain ? null : row.id)}
+                                    >
+                                        <div className={styles.stageTimelineLabelName}>{row.isMain ? row.label : row.label}</div>
+                                        <div className={styles.stageTimelineLabelMeta}>
+                                            {row.isMain ? '主时间轴' : `layer ${row.relLayer}  ${row.startMs}ms${row.kind ? `  ${row.kind}` : ''}`}
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={styles.stageTimelineTrack + (row.active ? ` ${styles.stageTimelineTrackActive}` : '')}
+                                        onClick={gotoFrameFromTrack}
+                                        style={{ width: timelineWidth, backgroundSize: `${TIMELINE_UNIT_WIDTH}px 100%` }}
+                                    >
+                                        {row.durationMs > 0 && (
+                                            <div
+                                                className={styles.stageTimelineBar}
+                                                title={labelTitle}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    setSelectedLayerId(row.isMain ? null : row.id);
+                                                    setIdx(frameIndexAtTimeMs(timelineStartMs, init.timeline, row.startMs));
+                                                }}
+                                                style={{
+                                                    left: timeToTimelineX(row.startMs),
+                                                    width: barWidth,
+                                                    background: `linear-gradient(180deg, ${color}, ${color}cc)`
+                                                }}
+                                            >
+                                                <span className={styles.stageTimelineBarText}>
+                                                    {row.isMain ? `MAIN ${row.durationMs}ms` : `${row.sourceId || row.id} ${row.durationMs}ms`}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {visibleKeyframes.map((frame, keyframeIndex) => {
+                                            const title = [
+                                                `t=${frame.timeMs}ms`,
+                                                `delay=${frame.durationMs}ms`,
+                                                `frame=${frame.frameIndex}`,
+                                                `fid=${frame.fid}`,
+                                                frame.img ? `img=${frame.img}` : 'img=<empty>',
+                                                typeof frame.dx === 'number' && typeof frame.dy === 'number' ? `pos=${frame.dx},${frame.dy}` : '',
+                                                markerSampled ? `marker ${keyframeIndex + 1}/${visibleKeyframes.length} sampled from ${row.keyframes.length}` : ''
+                                            ].filter(Boolean).join('  ');
+                                            return (
+                                                <div
+                                                    key={`${frame.timeMs}-${frame.frameIndex}-${keyframeIndex}`}
+                                                    className={styles.stageTimelineKeyframe}
+                                                    title={title}
+                                                    style={{ left: Math.max(0, timeToTimelineX(frame.timeMs) - 2) }}
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        setSelectedLayerId(row.isMain ? null : row.id);
+                                                        setIdx(frameIndexAtTimeMs(timelineStartMs, init.timeline, frame.timeMs));
+                                                    }}
+                                                />
+                                            );
+                                        })}
+                                        <div className={styles.stageTimelinePlayhead} style={{ left: timeToTimelineX(currentTimeMs) }} />
+                                    </div>
+                                </React.Fragment>
+                            );
+                        })}
+                    </div>
+                </div>
+            ) : (
+                <div className={styles.stageTimelineEmpty}>没有可显示的时间轴帧。</div>
+            )}
+        </div>
+    ) : null;
     const ui = (
     <FluentProvider theme={fluentTheme} className={styles.root}>
             <div className={styles.topPanelShell}>
@@ -584,29 +1109,31 @@ const useAniLogic = () => {
                     <div className={styles.topPanelInner} style={{ transformOrigin: 'top', marginTop: panelOpen ? 6 : 0 }}>
                         <div className={styles.panelGroups}>
                             <div className={styles.section} style={{ width: '100%' }}>
-                                <div className={styles.sectionHeader}>ALS 图层 <div style={{ display: 'flex', gap: 6 }}><Switch checked={alsOn} onChange={(_, d) => setAlsOn(!!d.checked)} /> <Button size='small' appearance='primary' onClick={() => setAlsPanelOpen(false)}>收起</Button></div></div>
-                                {!alsOn && <div style={{ fontSize: 12, opacity: .6 }}>开启 ALS 开关后可编辑附加图层。</div>}
-                                {alsOn && (
+                                <div className={styles.sectionHeader}>{hasTimeBasedLayers ? '舞台图层' : 'ALS 图层'} <div style={{ display: 'flex', gap: 6 }}><Switch checked={hasTimeBasedLayers ? true : alsOn} disabled={hasTimeBasedLayers} onChange={(_, d) => setAlsOn(!!d.checked)} /> <Button size='small' appearance='primary' onClick={() => setAlsPanelOpen(false)}>收起</Button></div></div>
+                                {!hasTimeBasedLayers && !alsOn && <div style={{ fontSize: 12, opacity: .6 }}>开启 ALS 开关后可编辑附加图层。</div>}
+                                {(hasTimeBasedLayers || alsOn) && (
                                     <div style={{ display: 'flex', flexDirection: 'column', marginTop: 6, gap: 6 }}>
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                                            <Button size='small' onClick={incStart}>起始帧+1</Button>
-                                            <Button size='small' onClick={decStart}>起始帧-1</Button>
-                                            <Button size='small' onClick={incDepth}>图层+1</Button>
-                                            <Button size='small' onClick={decDepth}>图层-1</Button>
-                                            <Button size='small' appearance='primary' onClick={saveAls}>保存ALS</Button>
-                                        </div>
+                                        {!hasTimeBasedLayers && (
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                                <Button size='small' onClick={incStart}>起始帧+1</Button>
+                                                <Button size='small' onClick={decStart}>起始帧-1</Button>
+                                                <Button size='small' onClick={incDepth}>图层+1</Button>
+                                                <Button size='small' onClick={decDepth}>图层-1</Button>
+                                                <Button size='small' appearance='primary' onClick={saveAls}>保存ALS</Button>
+                                            </div>
+                                        )}
                                         <div style={{ maxHeight: 180, overflow: 'auto', border: '1px solid var(--vscode-panel-border)', padding: 4, borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
                                             {workingLayers.map(l => {
                                                 const active = l.id === selectedLayerId;
                                                 return <div key={l.id} onClick={() => setSelectedLayerId(p => p === l.id ? null : l.id)} style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4, background: active ? UI_COLORS.layerActiveBg : UI_COLORS.layerInactiveBg, display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}>
                                                     <span style={{ fontWeight: 600, marginRight: 8 }}>{l.id}</span>
-                                                    <span style={{ opacity: .8 }}>start={l.order} depth={l.relLayer}{l.kind ? (' ' + l.kind) : ''}</span>
+                                                    <span style={{ opacity: .8 }}>{hasTimeBasedLayers ? `start=${l.startMs || 0}ms layer=${l.relLayer}` : `start=${l.order} depth=${l.relLayer}`}{l.kind ? (' ' + l.kind) : ''}</span>
                                                 </div>;
                                             })}
                                             {!workingLayers.length && <div style={{ fontSize: 12, opacity: .6 }}>无 ALS 图层</div>}
                                         </div>
                                         <div style={{ fontSize: 11, opacity: .6, lineHeight: 1.4 }}>
-                                            提示: 选择图层后使用按钮进行变更图层以及该图层相对于主ani的起始帧。保存会写回 .ani.als，你需要手动保存。
+                                            {hasTimeBasedLayers ? '当前为技能舞台时间轴，按真实 delay 以 10ms 单位预览。' : '提示: 选择图层后使用按钮进行变更图层以及该图层相对于主ani的起始帧。保存会写回 .ani.als，你需要手动保存。'}
                                         </div>
                                     </div>
                                 )}
@@ -623,6 +1150,7 @@ const useAniLogic = () => {
                     <Button onClick={gotoPrev}>上帧</Button>
                     <Button onClick={gotoNext}>下帧</Button>
                     {!alsPanelOpen && <Button onClick={() => setAlsPanelOpen(true)}>ALS</Button>}
+                    <Button onClick={() => setStageTimelineOpen(v => !v)}>{stageTimelineOpen ? '隐藏时间轴' : '时间轴'}</Button>
 
                     <span>帧 {frameInfo}</span>
                     <span>延时 {currentDelay}ms</span>
@@ -632,6 +1160,7 @@ const useAniLogic = () => {
             <div className={styles.canvasWrap}>
                 <canvas ref={canvasRef} className={styles.canvas} onDoubleClick={resetView} />
             </div>
+            {stageTimeline}
         </FluentProvider>
     );
     return { ui };

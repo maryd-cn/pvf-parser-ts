@@ -5,7 +5,34 @@ import { loadAniFromPvf } from './pvfResolver';
 import { parseAniText } from './parseAni';
 import { getSpriteRgba } from '../../npk/imgReader.js';
 import { PvfModel } from '../../pvf/model';
-import { ParsedAls, AlsAddRef } from './parseAls';
+import { ParsedAls, alsLayerInstanceId } from './parseAls';
+
+export const STAGE_TIMELINE_TICK_MS = 10;
+const MAX_TIME_COMPOSITE_FRAMES = 1200;
+
+export interface StageKeyframeMeta {
+  timeMs: number;
+  durationMs: number;
+  img: string;
+  fid: number;
+  frameIndex: number;
+  dx?: number;
+  dy?: number;
+}
+
+export interface StageTimelineComponentInput {
+  id: string;
+  sourceId?: string;
+  source?: string;
+  frames: FrameSeqEntry[];
+  relLayer: number;
+  order?: number;
+  startMs: number;
+  dx?: number;
+  dy?: number;
+  kind?: string;
+  isMain?: boolean;
+}
 
 export async function buildTimelineFromFrames(context: vscode.ExtensionContext, root: string, framesSeq: FrameSeqEntry[], out?: vscode.OutputChannel, options: { resolveEmptyImage?: (frame: FrameSeqEntry) => string | undefined; skipImageScan?: boolean } = {}): Promise<{ timeline: TimelineFrame[], albumMap: Map<string, any> }>{
   const albumMap = new Map<string, any>();
@@ -103,7 +130,9 @@ export async function buildTimelineFromPvfFrames(context: vscode.ExtensionContex
 function buildTimelineFromSequence(framesSeq: FrameSeqEntry[], albumMap: Map<string, any>, options: { resolveEmptyImage?: (frame: FrameSeqEntry) => string | undefined } = {}): { timeline: TimelineFrame[], albumMap: Map<string, any> } {
   const timeline: TimelineFrame[] = [];
   const TRANSPARENT_1X1 = 'AAAAAA==';
-  for (const f of framesSeq) {
+  let timeMs = 0;
+  for (let frameIndex = 0; frameIndex < framesSeq.length; frameIndex++) {
+    const f = framesSeq[frameIndex];
     const imgKey = (f.img || '').trim() || options.resolveEmptyImage?.(f)?.trim() || '';
     const al = imgKey ? albumMap.get(imgKey) : undefined;
     if (al) {
@@ -112,13 +141,113 @@ function buildTimelineFromSequence(framesSeq: FrameSeqEntry[], albumMap: Map<str
         const b64 = Buffer.from(rgba).toString('base64');
         const sp = al.sprites[f.idx];
         // 分离：dx,dy 为 ANI 原始 [IMAGE POS]；ox,oy 为 IMG 内部偏移（sprite.x,y）
-        timeline.push({ rgba: b64, w: sp.width, h: sp.height, delay: f.delay, dx: (f.pos?.x || 0), dy: (f.pos?.y || 0), ox: sp.x || 0, oy: sp.y || 0, fid: f.idx, gfx: f.gfx ? (typeof f.gfx === 'string' ? f.gfx.replace(/^[\'"`]|[\'"`]$/g, '').toUpperCase() : String(f.gfx).toUpperCase()) : undefined, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint, atk: f.atk || [], dmg: f.dmg || [] });
+        timeline.push({ rgba: b64, w: sp.width, h: sp.height, delay: f.delay, dx: (f.pos?.x || 0), dy: (f.pos?.y || 0), ox: sp.x || 0, oy: sp.y || 0, fid: f.idx, gfx: f.gfx ? (typeof f.gfx === 'string' ? f.gfx.replace(/^[\'"`]|[\'"`]$/g, '').toUpperCase() : String(f.gfx).toUpperCase()) : undefined, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint, atk: f.atk || [], dmg: f.dmg || [], timeMs, __img: imgKey, __frameIndex: frameIndex });
+        timeMs += frameDelayMs(f);
         continue;
       }
     }
-    timeline.push({ rgba: TRANSPARENT_1X1, w: 1, h: 1, delay: f.delay, dx: f.pos?.x || 0, dy: f.pos?.y || 0, ox: 0, oy: 0, fid: f.idx, gfx: f.gfx ? (typeof f.gfx === 'string' ? f.gfx.replace(/^[\'"`]|[\'"`]$/g, '').toUpperCase() : String(f.gfx).toUpperCase()) : undefined, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint, atk: f.atk || [], dmg: f.dmg || [] });
+    timeline.push({ rgba: TRANSPARENT_1X1, w: 1, h: 1, delay: f.delay, dx: f.pos?.x || 0, dy: f.pos?.y || 0, ox: 0, oy: 0, fid: f.idx, gfx: f.gfx ? (typeof f.gfx === 'string' ? f.gfx.replace(/^[\'"`]|[\'"`]$/g, '').toUpperCase() : String(f.gfx).toUpperCase()) : undefined, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint, atk: f.atk || [], dmg: f.dmg || [], timeMs, __img: imgKey, __frameIndex: frameIndex });
+    timeMs += frameDelayMs(f);
   }
   return { timeline, albumMap };
+}
+
+const TRANSPARENT_1X1 = 'AAAAAA==';
+
+export function frameDelayMs(frame: FrameSeqEntry | undefined): number {
+  const delay = Number(frame?.delay);
+  return Number.isFinite(delay) && delay > 0 ? delay : 50;
+}
+
+export function framesDurationMs(frames: FrameSeqEntry[]): number {
+  return frames.reduce((total, frame) => total + frameDelayMs(frame), 0);
+}
+
+export function frameIndexAtTime(frames: FrameSeqEntry[], elapsedMs: number): number {
+  if (!frames.length) return -1;
+  if (elapsedMs <= 0) return 0;
+  let cursor = 0;
+  for (let i = 0; i < frames.length; i++) {
+    const next = cursor + frameDelayMs(frames[i]);
+    if (elapsedMs < next) return i;
+    cursor = next;
+  }
+  return -1;
+}
+
+export function frameStartTimeMs(frames: FrameSeqEntry[], frameIndex: number): number {
+  let total = 0;
+  for (let i = 0; i < frameIndex && i < frames.length; i++) total += frameDelayMs(frames[i]);
+  return total;
+}
+
+export function buildStageKeyframes(frames: FrameSeqEntry[], offsetMs = 0): StageKeyframeMeta[] {
+  const out: StageKeyframeMeta[] = [];
+  let cursor = offsetMs;
+  for (let i = 0; i < frames.length; i++) {
+    const frame = frames[i];
+    const durationMs = frameDelayMs(frame);
+    out.push({
+      timeMs: cursor,
+      durationMs,
+      img: (frame.img || '').trim(),
+      fid: frame.idx,
+      frameIndex: i,
+      dx: frame.pos?.x,
+      dy: frame.pos?.y,
+    });
+    cursor += durationMs;
+  }
+  return out;
+}
+
+function frameStartTimesMs(frames: FrameSeqEntry[], offsetMs = 0): number[] {
+  const times: number[] = [];
+  let cursor = offsetMs;
+  for (const frame of frames) {
+    times.push(cursor);
+    cursor += frameDelayMs(frame);
+  }
+  return times;
+}
+
+function collectFrameImageKeys(frames: FrameSeqEntry[]): string[] {
+  return frames.map(frame => (frame.img || '').trim()).filter(value => value.length > 0 && !value.toLowerCase().endsWith('.ani'));
+}
+
+function makeTimelineLayerFrame(frame: FrameSeqEntry, albumMap: Map<string, any>): any {
+  const imgKey = (frame.img || '').trim();
+  const al = imgKey ? albumMap.get(imgKey) : undefined;
+  const gfx = frame.gfx ? (typeof frame.gfx === 'string' ? frame.gfx.replace(/^[\'"`]|[\'"`]$/g, '').toUpperCase() : String(frame.gfx).toUpperCase()) : undefined;
+  if (al) {
+    const rgba = getSpriteRgba(al, frame.idx);
+    if (rgba) {
+      const b64 = Buffer.from(rgba).toString('base64');
+      const sp = al.sprites[frame.idx];
+      return { rgba: b64, w: sp.width, h: sp.height, dx: frame.pos?.x || 0, dy: frame.pos?.y || 0, ox: sp.x || 0, oy: sp.y || 0, fid: frame.idx, gfx, sx: frame.scale?.x, sy: frame.scale?.y, rot: frame.rotate, tint: frame.tint, atk: frame.atk || [], dmg: frame.dmg || [] };
+    }
+  }
+  return { rgba: TRANSPARENT_1X1, w: 1, h: 1, dx: frame.pos?.x || 0, dy: frame.pos?.y || 0, ox: 0, oy: 0, fid: frame.idx, gfx, sx: frame.scale?.x, sy: frame.scale?.y, rot: frame.rotate, tint: frame.tint, atk: frame.atk || [], dmg: frame.dmg || [] };
+}
+
+function loadAlbumsForFrames(context: vscode.ExtensionContext, root: string, allFrames: FrameSeqEntry[][], out?: vscode.OutputChannel, options: { skipImageScan?: boolean; title?: string } = {}): Promise<Map<string, any>> {
+  const uniqueImgs = Array.from(new Set(allFrames.flatMap(collectFrameImageKeys)));
+  const albumMap = new Map<string, any>();
+  const total = uniqueImgs.length || 1;
+  let done = 0;
+  return Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: options.title || '加载所有图层 IMG 资源…' }, async (p) => {
+    for (const img of uniqueImgs) {
+      const al = await loadAlbumForImage(context, root, img, out, { skipScan: options.skipImageScan });
+      if (al) albumMap.set(img, al);
+      done++;
+      p.report({ increment: (done / total) * 100, message: `${done}/${total}` });
+    }
+    if (uniqueImgs.length > 0 && albumMap.size === 0) {
+      if (options.skipImageScan) out?.appendLine('未找到任何 IMG 资源，仅显示坐标/碰撞盒');
+      else vscode.window.showWarningMessage('未找到任何 IMG 资源，仅显示坐标/碰撞盒');
+    }
+    return albumMap;
+  }));
 }
 
 /**
@@ -151,10 +280,10 @@ export async function buildCompositeTimeline(context: vscode.ExtensionContext, r
       if (rgba) {
         const b64 = Buffer.from(rgba).toString('base64');
         const sp = al.sprites[f.idx];
-        return { rgba: b64, w: sp.width, h: sp.height, dx: (f.pos?.x||0), dy: (f.pos?.y||0), ox: sp.x||0, oy: sp.y||0, fid: f.idx, gfx: f.gfx, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint };
+        return { rgba: b64, w: sp.width, h: sp.height, dx: (f.pos?.x||0), dy: (f.pos?.y||0), ox: sp.x||0, oy: sp.y||0, fid: f.idx, gfx: f.gfx, sx: f.scale?.x, sy: f.scale?.y, rot: f.rotate, tint: f.tint, __img: imgKey };
       }
     }
-    return { rgba: TRANSPARENT_1X1, w:1, h:1, dx:(f.pos?.x||0), dy:(f.pos?.y||0), ox:0, oy:0, fid: f.idx };
+    return { rgba: TRANSPARENT_1X1, w:1, h:1, dx:(f.pos?.x||0), dy:(f.pos?.y||0), ox:0, oy:0, fid: f.idx, __img: imgKey };
   };
 
   // 图层列表：按 depth(relLayer) 升序；同 depth 保留文件出现顺序 (layerAniMap 插入顺序即 adds 顺序)
@@ -167,18 +296,29 @@ export async function buildCompositeTimeline(context: vscode.ExtensionContext, r
     }
   }
   const timeline: any[] = [];
-  for (let i=0;i<mainFrames.length;i++) {
+  const compositeFrameCount = Math.max(
+    mainFrames.length,
+    ...layerList.map(layer => Math.max(0, layer.order) + layer.frames.length),
+  );
+  const mainFrameTimes: number[] = [];
+  let cursorMs = 0;
+  for (let i = 0; i < compositeFrameCount; i++) {
+    mainFrameTimes.push(cursorMs);
+    cursorMs += frameDelayMs(mainFrames[i] || mainFrames[mainFrames.length - 1]);
+  }
+  for (let i=0;i<compositeFrameCount;i++) {
     const mf = mainFrames[i];
-    const mainLayerFrame = makeLayerFrame(mf);
+    const timeMs = mainFrameTimes[i] || 0;
+    const mainLayerFrame = mf ? makeLayerFrame(mf) : { rgba: TRANSPARENT_1X1, w: 1, h: 1, dx: 0, dy: 0, ox: 0, oy: 0, fid: 0 };
     // 主帧作为单独对象，同时放入 layers 数组；攻击盒等沿用主帧
     const layers: any[] = [];
     // 主层加入
-    layers.push({ ...mainLayerFrame, __main: true, __rel: 0, __order: 0, __id: 'MAIN' });
+    layers.push({ ...mainLayerFrame, __main: true, __rel: 0, __order: 0, __id: 'MAIN', __sourceId: 'MAIN', __frameIndex: i, __timeMs: timeMs, __durationMs: framesDurationMs(mainFrames) });
     for (const l of layerList) {
       const startFrame = l.order; // order => startFrame
       const frameIndex = i - startFrame;
       if (frameIndex < 0 || frameIndex >= l.frames.length) continue;
-      layers.push({ ...makeLayerFrame(l.frames[frameIndex]), __rel: l.relLayer, __order: startFrame, __id: l.id, __start: startFrame });
+      layers.push({ ...makeLayerFrame(l.frames[frameIndex]), __rel: l.relLayer, __order: startFrame, __id: l.id, __sourceId: l.id.replace(/#\d+$/i, ''), __start: startFrame, __startMs: frameStartTimeMs(mainFrames, startFrame), __durationMs: framesDurationMs(l.frames), __frameIndex: frameIndex, __timeMs: timeMs });
     }
     // 排序：先 __rel (层级)，相同层级内主层优先，然后按出现顺序（不再改变），保持已插入顺序
     layers.sort((a,b)=> {
@@ -197,10 +337,108 @@ export async function buildCompositeTimeline(context: vscode.ExtensionContext, r
       dx: mainLayerFrame.dx,
       dy: mainLayerFrame.dy,
       fid: mainLayerFrame.fid,
-      delay: mf.delay,
-      atk: mf.atk || [],
-      dmg: mf.dmg || [],
+      timeMs,
+      delay: mf?.delay || mainFrames[mainFrames.length - 1]?.delay || 50,
+      atk: mf?.atk || [],
+      dmg: mf?.dmg || [],
       layers
+    });
+  }
+  return { timeline, albumMap };
+}
+
+export async function buildTimeCompositeTimeline(
+  context: vscode.ExtensionContext,
+  root: string,
+  components: StageTimelineComponentInput[],
+  out?: vscode.OutputChannel,
+  options: { skipImageScan?: boolean; tickMs?: number } = {},
+): Promise<{ timeline: any[], albumMap: Map<string, any> }> {
+  const tickMs = Math.max(1, Math.round(options.tickMs || STAGE_TIMELINE_TICK_MS));
+  const activeComponents = components.filter(component => component.frames.length > 0);
+  const albumMap = await loadAlbumsForFrames(context, root, activeComponents.map(component => component.frames), out, { skipImageScan: options.skipImageScan, title: '按时间加载技能动画 IMG 资源…' });
+  const sortedComponents = activeComponents.map((component, seq) => ({ component, seq }))
+    .sort((a, b) => {
+      if (a.component.relLayer !== b.component.relLayer) return a.component.relLayer - b.component.relLayer;
+      if (!!a.component.isMain !== !!b.component.isMain) return a.component.isMain ? -1 : 1;
+      return a.seq - b.seq;
+    });
+  const totalDurationMs = Math.max(
+    tickMs,
+    ...activeComponents.map(component => Math.max(0, component.startMs) + framesDurationMs(component.frames)),
+  );
+  const eventSet = new Set<number>([0, totalDurationMs]);
+  for (const component of activeComponents) {
+    for (const timeMs of frameStartTimesMs(component.frames, component.startMs)) {
+      if (timeMs >= 0 && timeMs < totalDurationMs) eventSet.add(Math.round(timeMs / tickMs) * tickMs);
+    }
+  }
+  let eventTimes = Array.from(eventSet).filter(timeMs => timeMs >= 0 && timeMs <= totalDurationMs).sort((a, b) => a - b);
+  if (eventTimes.length > MAX_TIME_COMPOSITE_FRAMES) {
+    const sampled = new Set<number>([0, totalDurationMs]);
+    const step = Math.ceil(eventTimes.length / MAX_TIME_COMPOSITE_FRAMES);
+    for (let i = 0; i < eventTimes.length; i += step) sampled.add(eventTimes[i]);
+    eventTimes = Array.from(sampled).sort((a, b) => a - b);
+    out?.appendLine(`[PVF] 技能预览事件帧过多，已降采样到 ${eventTimes.length} 帧以保护宿主窗口`);
+  }
+  const main = activeComponents.find(component => component.isMain) || activeComponents[0];
+  const fallbackFrame = { rgba: TRANSPARENT_1X1, w: 1, h: 1, dx: 0, dy: 0, ox: 0, oy: 0, fid: 0 };
+  const timeline: any[] = [];
+
+  for (let eventIndex = 0; eventIndex < eventTimes.length - 1; eventIndex++) {
+    const timeMs = eventTimes[eventIndex];
+    const nextTimeMs = eventTimes[eventIndex + 1];
+    const layers: any[] = [];
+    let mainFrame: FrameSeqEntry | undefined;
+    let mainLayerFrame: any | undefined;
+    for (const { component, seq } of sortedComponents) {
+      const elapsedMs = timeMs - component.startMs;
+      const frameIndex = frameIndexAtTime(component.frames, elapsedMs);
+      if (frameIndex < 0) continue;
+      const frame = component.frames[frameIndex];
+      const layerFrame = {
+        ...makeTimelineLayerFrame(frame, albumMap),
+        __main: !!component.isMain,
+        __rel: component.relLayer,
+        __order: typeof component.order === 'number' ? component.order : Math.round(component.startMs / tickMs),
+        __start: Math.round(component.startMs / tickMs),
+        __startMs: component.startMs,
+        __durationMs: framesDurationMs(component.frames),
+        __id: component.id,
+        __sourceId: component.sourceId || component.id,
+        __source: component.source,
+        __frameIndex: frameIndex,
+        __timeMs: timeMs,
+        __img: (frame.img || '').trim(),
+        __seq: seq,
+      };
+      layers.push(layerFrame);
+      if (component === main) {
+        mainFrame = frame;
+        mainLayerFrame = layerFrame;
+      }
+    }
+    if (!mainLayerFrame && main) {
+      const elapsedMs = timeMs - main.startMs;
+      const frameIndex = frameIndexAtTime(main.frames, elapsedMs);
+      if (frameIndex >= 0) {
+        mainFrame = main.frames[frameIndex];
+        mainLayerFrame = makeTimelineLayerFrame(mainFrame, albumMap);
+      }
+    }
+    if (!mainLayerFrame) mainLayerFrame = fallbackFrame;
+    timeline.push({
+      rgba: mainLayerFrame.rgba,
+      w: mainLayerFrame.w,
+      h: mainLayerFrame.h,
+      dx: mainLayerFrame.dx,
+      dy: mainLayerFrame.dy,
+      fid: mainLayerFrame.fid,
+      timeMs,
+      delay: Math.max(1, nextTimeMs - timeMs),
+      atk: mainFrame?.atk || [],
+      dmg: mainFrame?.dmg || [],
+      layers,
     });
   }
   return { timeline, albumMap };
@@ -219,10 +457,21 @@ export async function expandAlsLayers(isPvf: boolean, context: vscode.ExtensionC
     }
     return outArr.join('/');
   };
-  for (const add of alsParsed.adds) {
+  const resolveDiskRelativeFile = async (baseDirFs: string, rawPath: string): Promise<string | undefined> => {
+    const fs = await import('fs/promises');
+    const pathMod = await import('path');
+    const cleaned = rawPath.replace(/^[`'\"]+/, '').replace(/[`'\"]+$/, '');
+    const firstCandidate = pathMod.isAbsolute(cleaned) ? cleaned : pathMod.resolve(baseDirFs, ...cleaned.replace(/\\/g, '/').split('/').filter(Boolean));
+    const direct = await existingFile(firstCandidate, fs);
+    if (direct) return direct;
+    if (pathMod.isAbsolute(cleaned)) return undefined;
+    return resolveCaseInsensitivePath(baseDirFs, cleaned, fs, pathMod);
+  };
+  for (let addIndex = 0; addIndex < alsParsed.adds.length; addIndex++) {
+    const add = alsParsed.adds[addIndex];
     const decl = alsParsed.uses.get(add.id);
     if (!decl) { out?.appendLine(`[ALS] 引用未找到对应声明 id=${add.id}`); continue; }
-    if (layerMap.has(add.id)) { out?.appendLine(`[ALS] 重复引用 id=${add.id}，已忽略后续`); continue; }
+    const instanceId = alsLayerInstanceId(alsParsed.adds, addIndex) || add.id;
     const rawPath = decl.path;
   let aniContent: string | undefined;
   let candidate: string | undefined;
@@ -269,19 +518,48 @@ export async function expandAlsLayers(isPvf: boolean, context: vscode.ExtensionC
             } catch {}
           }
       } else {
+        candidate = await resolveDiskRelativeFile(baseDir, rawPath);
+        if (!candidate) throw new Error(`file not found: ${rawPath}`);
         const fs = await import('fs/promises');
-        const pathMod = await import('path');
-        const cleaned = rawPath.replace(/^[`'\"]+/, '').replace(/[`'\"]+$/, '');
-        const abs = pathMod.isAbsolute(cleaned) ? cleaned : pathMod.join(baseDir, cleaned);
-        aniContent = await fs.readFile(abs, 'utf8');
+        aniContent = await fs.readFile(candidate, 'utf8');
       }
     } catch (e) { out?.appendLine(`[ALS] 读取附加 ani 失败 id=${add.id} path=${rawPath} -> ${String(e)}`); }
     if (!aniContent) { continue; }
     const { framesSeq } = parseAniText(aniContent);
-    out?.appendLine(`[ALS] 解析附加 ani 成功 id=${add.id} 帧数=${framesSeq.length}`);
+    out?.appendLine(`[ALS] 解析附加 ani 成功 id=${instanceId} use=${add.id} 帧数=${framesSeq.length}`);
   // 使用解析后的候选路径（candidate）作为 source，便于后续保存时定位文件；若未解析则回退原始声明路径
-  layerMap.set(add.id, { frames: framesSeq, relLayer: add.relLayer, order: add.order, id: add.id, source: (isPvf ? (candidate||rawPath) : (typeof (aniContent) === 'string' ? (candidate||decl.path) : decl.path)) });
+  layerMap.set(instanceId, { frames: framesSeq, relLayer: add.relLayer, order: add.order, id: instanceId, source: (isPvf ? (candidate||rawPath) : (typeof (aniContent) === 'string' ? (candidate||decl.path) : decl.path)) });
   }
   return layerMap;
 }
 
+async function existingFile(candidate: string, fs: typeof import('fs/promises')): Promise<string | undefined> {
+  try {
+    const stat = await fs.stat(candidate);
+    return stat.isFile() ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveCaseInsensitivePath(baseDir: string, relPath: string, fs: typeof import('fs/promises'), pathMod: typeof import('path')): Promise<string | undefined> {
+  const segments = relPath.replace(/\\/g, '/').split('/').filter(segment => segment.length > 0);
+  let current = pathMod.resolve(baseDir);
+  for (const segment of segments) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      current = pathMod.dirname(current);
+      continue;
+    }
+    let dirents: import('fs').Dirent[];
+    try {
+      dirents = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    const found = dirents.find(dirent => dirent.name.toLowerCase() === segment.toLowerCase());
+    if (!found) return undefined;
+    current = pathMod.join(current, found.name);
+  }
+  return existingFile(current, fs);
+}

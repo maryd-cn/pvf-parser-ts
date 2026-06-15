@@ -9,6 +9,15 @@ export interface AlsUseDecl { id: string; path: string; }
 export interface AlsAddRef { relLayer: number; order: number; id: string; kind?: 'add'|'none-effect-add'|'draw-only'; }
 export interface ParsedAls { uses: Map<string, AlsUseDecl>; adds: AlsAddRef[]; }
 
+export function alsLayerInstanceId(adds: AlsAddRef[], seq: number): string {
+  const add = adds[seq];
+  if (!add) return '';
+  const count = adds.reduce((total, item) => total + (item.id === add.id ? 1 : 0), 0);
+  if (count <= 1) return add.id;
+  const occurrence = adds.slice(0, seq + 1).reduce((total, item) => total + (item.id === add.id ? 1 : 0), 0);
+  return `${add.id}#${occurrence}`;
+}
+
 /** 解析 .ani.als 文件内容（容错：空行 / 额外缩进 / 不规则大小写） */
 export function parseAlsText(text: string, out?: vscode.OutputChannel): ParsedAls {
   const uses = new Map<string, AlsUseDecl>();
@@ -35,7 +44,7 @@ export function parseAlsText(text: string, out?: vscode.OutputChannel): ParsedAl
   }
 
   // [create draw only object]
-  const drawOnlyRe = /\[create\s+draw\s+only\s+object\]\s*\r?\n+([\s#]*\r?\n+)*\s*(-?\d+)\s*\r?\n+([\s#]*\r?\n+)*\s*`([^`]+)`/gi;
+  const drawOnlyRe = /\[create\s+draw\s+only\s+object\]\s*\r?\n+([\s#]*\r?\n+)*\s*(-?\d+)\s*\r?\n+([\s#]*\r?\n+)*\s*`([^`]+)`(?:[^\r\n]*)?/gi;
   while ((m = drawOnlyRe.exec(text)) !== null) {
   const start = parseInt(m[2],10)||0; const id = norm(m[4]);
   // draw-only 没有 depth, 设 depth=0
@@ -81,7 +90,7 @@ export function parseAlsText(text: string, out?: vscode.OutputChannel): ParsedAl
         let j=i+1; while (j<lines.length && lines[j].trim()==='') j++;
         if (j<lines.length) { const o = parseInt(lines[j].trim(),10); if (!isNaN(o)) start = o; }
         j++; while (j<lines.length && lines[j].trim()==='') j++;
-        if (j<lines.length) { const idMatch = lines[j].trim().match(/^`([^`]+)`$/); if (idMatch) id = norm(idMatch[1]); }
+        if (j<lines.length) { const idMatch = lines[j].trim().match(/^`([^`]+)`/); if (idMatch) id = norm(idMatch[1]); }
         if (id) adds.push({ relLayer:0, order:start, id, kind:'draw-only' });
       }
     }

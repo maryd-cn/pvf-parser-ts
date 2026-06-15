@@ -22,7 +22,11 @@ export function parseAniText(text: string, options: { silent?: boolean } = {}): 
       const firstLine = (imageLines[0] || '').trim();
       const secondLine = (imageLines[1] || '').trim();
       const firstAsIndex = parseStrictInt(firstLine);
-      if (typeof firstAsIndex === 'number') {
+      if (isExplicitEmptyImage(firstLine)) {
+        img = '';
+        const parsed = parseStrictInt(secondLine);
+        if (typeof parsed === 'number') idx = parsed;
+      } else if (typeof firstAsIndex === 'number') {
         img = lastImagePath;
         idx = firstAsIndex;
       } else {
@@ -82,6 +86,11 @@ function cleanQuotedValue(value: string): string {
     return text.slice(1, -1).trim();
   }
   return text;
+}
+
+function isExplicitEmptyImage(value: string): boolean {
+  const text = (value || '').trim();
+  return text === '``' || text === '""' || text === "''";
 }
 
 function parseStrictInt(value: string): number | undefined {

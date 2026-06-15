@@ -175,8 +175,8 @@ body {
   padding: 12px 14px;
 }
 .ani-preview-shell {
-  height: calc(100vh - 24px);
-  min-height: 360px;
+  height: clamp(360px, calc(100vh - 24px), 920px);
+  min-height: min(360px, calc(100vh - 24px));
   overflow: hidden;
   background: var(--vscode-editor-background);
   border: 1px solid var(--vscode-panel-border, #333);
@@ -188,16 +188,16 @@ body {
 .skill-animation {
   margin: 8px 0 4px;
 }
-.skill-animation-canvas {
-  height: 320px;
-  min-height: 260px;
-  overflow: hidden;
-  border: 1px solid #343943;
+.skill-animation-preview {
+  min-height: 520px;
+  height: auto;
+  overflow: visible;
   background: var(--vscode-editor-background);
 }
-.skill-animation-canvas #root {
+.skill-animation-preview #root {
   width: 100%;
-  height: 100%;
+  min-height: 520px;
+  height: auto;
 }
 .hover-preview {
   display: grid;
@@ -778,7 +778,7 @@ function renderSkillAnimation(preview: UnpackHoverPreview, scriptUri: string): s
     : `<div class="preview-table-caption">动画预览</div>`;
   return `<section class="skill-animation">
 ${sourceButton}
-<div class="skill-animation-canvas"><div id="root"></div></div>
+<div class="skill-animation-preview"><div id="root"></div></div>
 <script>window.__ANI_INIT=${jsonScript(initPayload)};</script>
 <script src="${escapeAttr(scriptUri)}"></script>
 </section>`;
